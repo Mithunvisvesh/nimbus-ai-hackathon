@@ -9,7 +9,7 @@
 
 ## 1. Data Flow Architecture
 
-CARE coordinates state through an append-only, verifiable data pipeline. State-changing operations are controlled through approved action hashes, pre-execution freshness checks, and write-ahead journaling.
+CARE coordinates state through a durable, verifiable data pipeline. State-changing operations are controlled through approved action hashes, pre-execution freshness checks, and a durable action journal.
 
 ```
                   ┌──────────────────────┐
@@ -66,6 +66,7 @@ class ConstraintType(str, Enum):
 class IntentConstraint(BaseModel):
     type: ConstraintType
     params: Dict[str, Any] = Field(default_factory=dict)
+    source: str = Field(description="explicit | inferred | policy")
 
 class StructuredIntent(BaseModel):
     goal: str = Field(description="Normalized summary of what the user wants to achieve")
@@ -107,6 +108,7 @@ class PlanStatus(str, Enum):
     AWAITING_CONFIRMATION = "awaiting_confirmation"
     APPROVED = "approved"
     BLOCKED = "blocked"
+    TERMINATED = "terminated"
     EXECUTING = "executing"
     DONE = "done"
     FAILED = "failed"
@@ -115,7 +117,7 @@ class PlanStatus(str, Enum):
     DRIFT = "drift"
 
 # Note on Clarification:
-# When policy returns 'CLARIFY', the current candidate plan is rejected/terminated.
+# When policy returns 'CLARIFY', the current candidate plan is rejected and persisted as TERMINATED.
 # The orchestrator asks the user for clarification, and upon user response, an entirely
 # NEW CandidatePlan with a fresh plan_id is generated. Clarification is not a persistent
 # executing state for an existing plan.
@@ -131,8 +133,8 @@ class PlannedAction(BaseModel):
     operation: str
     parameters: Dict[str, Any] = Field(default_factory=dict)
     before_state: Dict[str, Any] = Field(default_factory=dict, description="Captured during dry-run read")
-    risk_level: RiskLevel = Field(default=RiskLevel.LOW)
-    reversible: bool = Field(default=True)
+    risk_level: RiskLevel = Field(default=RiskLevel.LOW, description="Advisory candidate value; deterministic policy validates against trusted tool metadata")
+    reversible: bool = Field(default=True, description="Advisory candidate value; authoritative value comes from trusted tool metadata")
     compensation_action: Optional[CompensationAction] = None
     constraints: List[IntentConstraint] = Field(default_factory=list)
 
@@ -140,7 +142,7 @@ class CandidatePlan(BaseModel):
     plan_id: str
     intent: StructuredIntent
     actor: str = Field(description="Requesting user identifier")
-    user_role: str = Field(default="STANDARD_USER", description="ADMIN | STANDARD_USER | READ_ONLY")
+    user_role: str = Field(description="Authenticated/simulated request role: ADMIN | STANDARD_USER | READ_ONLY")
     actions: List[PlannedAction]
     action_hash: Optional[str] = None
     policy_outcome: Optional[PolicyOutcome] = None
@@ -166,6 +168,7 @@ class ActionJournalStatus(str, Enum):
     FAILED = "failed"
     COMPENSATED = "compensated"
     DRIFT = "drift"
+    UNKNOWN = "unknown"
 
 class JournalRecord(BaseModel):
     plan_id: str
@@ -183,6 +186,27 @@ class JournalRecord(BaseModel):
     timestamp: str = Field(default_factory=lambda: datetime.utcnow().isoformat() + "Z")
     result: Optional[Dict[str, Any]] = None
     error: Optional[str] = None
+```
+
+> **Provenance rule:** `actor` and `user_role` are supplied by the authenticated/simulated request context, never inferred by the LLM. Security-relevant action metadata such as risk, reversibility, destructive behavior, external impact, and compensation support is authoritative only when supplied by the trusted control/tool layer.
+
+---
+
+### 2.4 Trusted Tool Metadata (`src/schemas/tool_metadata.py`)
+
+Security-sensitive operation properties are deterministic metadata owned by the tool/control layer. LLM-proposed values are advisory and cannot independently authorize execution.
+
+```python
+from pydantic import BaseModel
+
+class ToolMetadata(BaseModel):
+    operation: str
+    read_only: bool
+    destructive: bool
+    reversible: bool
+    external_effect: bool
+    affects_external_party: bool
+    compensation_supported: bool
 ```
 
 ---
@@ -229,6 +253,21 @@ CARE utilizes an embedded SQLite database running with Write-Ahead Logging (`WAL
 PRAGMA journal_mode = WAL;
 PRAGMA foreign_keys = ON;
 
+-- Table: approved_plans
+CREATE TABLE IF NOT EXISTS approved_plans (
+    plan_id TEXT PRIMARY KEY,
+    actor TEXT NOT NULL,
+    user_role TEXT NOT NULL,
+    policy_outcome TEXT NOT NULL,
+    action_hash TEXT NOT NULL,
+    actions_json TEXT NOT NULL,              -- canonical JSON serialized
+    status TEXT NOT NULL,                   -- awaiting_confirmation | approved | executing | done | failed | recovering | compensated | drift | terminated
+    created_at TEXT NOT NULL,
+    approved_at TEXT,
+    executing_at TEXT,
+    completed_at TEXT
+);
+
 -- Table: journal_records
 CREATE TABLE IF NOT EXISTS journal_records (
     record_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -243,7 +282,7 @@ CREATE TABLE IF NOT EXISTS journal_records (
     before_state TEXT NOT NULL,         -- JSON serialized
     after_state TEXT,                  -- JSON serialized (NULL until tool succeeds)
     compensation_action TEXT,          -- JSON serialized
-    status TEXT NOT NULL,              -- planned | executing | done | failed | compensated | drift
+    status TEXT NOT NULL,              -- planned | executing | unknown | done | failed | compensated | drift
     timestamp TEXT NOT NULL,           -- ISO-8601 UTC
     result TEXT,                       -- JSON serialized
     error TEXT,
@@ -263,18 +302,27 @@ CREATE TABLE IF NOT EXISTS drift_incidents (
     notes TEXT
 );
 
--- Performance & Audit Indexes
+-- Plan & audit indexes
+CREATE INDEX IF NOT EXISTS idx_approved_plans_status ON approved_plans(status);
 CREATE INDEX IF NOT EXISTS idx_journal_plan_id ON journal_records(plan_id);
 CREATE INDEX IF NOT EXISTS idx_journal_resource ON journal_records(resource_type, resource_id);
 CREATE INDEX IF NOT EXISTS idx_journal_status ON journal_records(status);
 ```
-> *Note on Immutability:* The action journal is **append-only by application design**; the application layers only insert execution records and update transaction outcomes, never dropping or overwriting historical audit entries.
+> *Note on Audit Preservation:* The action journal is a **durable action journal with application-level audit preservation**. Historical records are never deleted or overwritten; the current transaction record may be updated with execution outcomes such as `executing`, `done`, or `failed`. SQLite WAL mode provides database-level durability/concurrency, not cryptographic immutability.
+
+---
+
+### 4.1 Durable Approved Plan
+
+`ApprovedPlan` is the persisted approved representation of a `CandidatePlan`; it does not require a separate action schema. The durable `approved_plans` record is the server-side authorization anchor used by the Controlled Executor. It stores the exact action list, `action_hash`, actor, role, policy outcome, and lifecycle status.
+
+The executor must use this stored record rather than trusting a client-supplied hash or reconstructed plan as proof of authorization.
 
 ---
 
 ## 5. Hash-Based Plan Integrity & Action-List Mismatch Detection
 
-The `action_hash` proves that the concrete action list being executed matches the exact action list that was evaluated and approved by the policy engine. Authorization remains securely bound server-side to the stored `ApprovedPlan` record associated with the `plan_id` (which binds `actor`, `user_role`, `policy_outcome`, `status`, and `actions`).
+The `action_hash` detects whether the concrete action list being executed matches the exact action list that was evaluated and approved by the policy engine. Authorization is bound server-side to the durable `ApprovedPlan` record associated with the `plan_id`, which binds `actor`, `user_role`, `policy_outcome`, `status`, and `actions`. The hash is not an authorization credential by itself.
 
 To compute `action_hash`:
 1. Extract list of `actions` from `CandidatePlan`.
@@ -333,6 +381,22 @@ A `plan_id` can be executed **exactly once**. The Controlled Executor strictly a
 2. Stored `plan.status == PlanStatus.APPROVED`.
 3. `submitted_action_hash == stored_plan.action_hash`.
 4. Requesting actor and role match the authorized plan record.
-5. Live target resources match `before_state` (freshness check).
+5. Immediately before each state-changing action, the live target resource matches that action's `before_state` (per-action freshness check).
 
-Immediately upon satisfying these conditions, the executor transitions `plan.status` to `EXECUTING`. Any subsequent submission of `(plan_id, action_hash)` will fail with `PLAN_ALREADY_CONSUMED`, providing application-level single-use plan replay protection.
+The state transition is implemented as an atomic compare-and-set, conceptually:
+
+```sql
+UPDATE approved_plans
+SET status = 'executing', executing_at = CURRENT_TIMESTAMP
+WHERE plan_id = ? AND status = 'approved';
+```
+
+The executor must require exactly one affected row before proceeding.
+
+Immediately upon satisfying these conditions, the executor atomically transitions `plan.status` from `APPROVED` to `EXECUTING`. The database update must succeed for exactly one row; concurrent or subsequent submissions fail with `PLAN_ALREADY_CONSUMED`. This provides application-level single-use plan replay protection.
+
+### Confirmation Binding
+For a `CONFIRM` outcome, the user's confirmation authorizes the exact persisted plan identified by `plan_id` and `action_hash`. The executor must not regenerate, reorder, or modify the action list after confirmation. Any change requires a new plan and new authorization.
+
+### Unknown Tool Outcome / Reconciliation
+If a state-changing tool may have been dispatched but the response is lost or ambiguous, the action is recorded as `UNKNOWN`, not `FAILED`. The recovery engine must reconcile the live external resource against the journaled `before_state` and expected `after_state` before deciding whether the action succeeded, failed, or requires recovery. An `UNKNOWN` action must never be blindly retried or compensated without reconciliation.
