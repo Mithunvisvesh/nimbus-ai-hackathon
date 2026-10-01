@@ -9,7 +9,7 @@
 
 ## 1. Data Flow Architecture
 
-CARE coordinates state through an append-only, verifiable data pipeline. State never mutates in-place without cryptographic integrity tracking and write-ahead journaling.
+CARE coordinates state through an append-only, verifiable data pipeline. State-changing operations are controlled through approved action hashes, pre-execution freshness checks, and write-ahead journaling.
 
 ```
                   ┌──────────────────────┐
@@ -113,6 +113,12 @@ class PlanStatus(str, Enum):
     RECOVERING = "recovering"
     COMPENSATED = "compensated"
     DRIFT = "drift"
+
+# Note on Clarification:
+# When policy returns 'CLARIFY', the current candidate plan is rejected/terminated.
+# The orchestrator asks the user for clarification, and upon user response, an entirely
+# NEW CandidatePlan with a fresh plan_id is generated. Clarification is not a persistent
+# executing state for an existing plan.
 
 class CompensationAction(BaseModel):
     operation: str
@@ -262,15 +268,18 @@ CREATE INDEX IF NOT EXISTS idx_journal_plan_id ON journal_records(plan_id);
 CREATE INDEX IF NOT EXISTS idx_journal_resource ON journal_records(resource_type, resource_id);
 CREATE INDEX IF NOT EXISTS idx_journal_status ON journal_records(status);
 ```
+> *Note on Immutability:* The action journal is **append-only by application design**; the application layers only insert execution records and update transaction outcomes, never dropping or overwriting historical audit entries.
 
 ---
 
-## 5. Canonical Hash Algorithm Specification
+## 5. Hash-Based Plan Integrity & Action-List Mismatch Detection
 
-To guarantee tamper resistance:
+The `action_hash` proves that the concrete action list being executed matches the exact action list that was evaluated and approved by the policy engine. Authorization remains securely bound server-side to the stored `ApprovedPlan` record associated with the `plan_id` (which binds `actor`, `user_role`, `policy_outcome`, `status`, and `actions`).
+
+To compute `action_hash`:
 1. Extract list of `actions` from `CandidatePlan`.
 2. Cleanse actions by discarding dynamic runtime fields (`status`, `result`, `error`).
-3. Serialize to JSON with sorted keys and compact separators:  
+3. Serialize to canonical JSON with sorted keys and compact separators:  
    `canonical_json = json.dumps(clean_actions, sort_keys=True, separators=(',', ':'))`
 4. Compute SHA-256 digest:  
    `action_hash = hashlib.sha256(canonical_json.encode('utf-8')).hexdigest()`
@@ -291,19 +300,19 @@ def compute_action_hash(actions: list) -> str:
 
 ---
 
-## 6. State Transition Lifecycles
+## 6. State Transition Lifecycles & Replay Protection
 
 ### Plan Lifecycle State Machine
 ```
 [PLANNED]
    │
-   ├── (Policy: CLARIFY) ─────────► [AWAITING_CONFIRMATION / RE-PLAN]
+   ├── (Policy: CLARIFY) ─────────► [TERMINATED / RE-PLAN] ──► (User Input) ──► [NEW PLAN]
    ├── (Policy: CONFIRM) ─────────► [AWAITING_CONFIRMATION] ──► (Approved) ──┐
    ├── (Policy: BLOCK) ───────────► [BLOCKED] (Terminated)                   │
    └── (Policy: AUTO-APPROVE) ────► [APPROVED] ◄─────────────────────────────┘
                                        │
-                                       ▼
-                                  [EXECUTING]
+                                       ▼ (Single-Use Execution Gate)
+                                  [EXECUTING]  ◄── State immediately locked
                                        │
                          ┌─────────────┴─────────────┐
                          ▼                           ▼
@@ -317,3 +326,13 @@ def compute_action_hash(actions: list) -> str:
                                  [COMPENSATED]                  [DRIFT]
                                                       (Requires Human Review)
 ```
+
+### Deterministic Single-Use Replay Protection Rule
+A `plan_id` can be executed **exactly once**. The Controlled Executor strictly asserts:
+1. `plan_id` exists in durable store.
+2. Stored `plan.status == PlanStatus.APPROVED`.
+3. `submitted_action_hash == stored_plan.action_hash`.
+4. Requesting actor and role match the authorized plan record.
+5. Live target resources match `before_state` (freshness check).
+
+Immediately upon satisfying these conditions, the executor transitions `plan.status` to `EXECUTING`. Any subsequent submission of `(plan_id, action_hash)` will fail with `PLAN_ALREADY_CONSUMED`, completely preventing replay.

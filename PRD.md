@@ -28,7 +28,9 @@ Autonomous AI agents in enterprise environments face a critical reliability barr
 
 ### Key Operational Scenarios
 - **Scenario 1 — Clear Request with Hidden Conflict:** An explicit reschedule request (*"Move 3 PM meeting to 5 PM"*) where the target slot is already booked. Dry-run detects the conflict and clarifies alternatives before touching live data.
-- **Scenario 2 — Ambiguous Consequential Scope:** A broad command (*"Clear my afternoon"*) where targets include internal recurring syncs and a high-stakes external client meeting. Policy gates the client meeting for clarification.
+- **Scenario 2 — Ambiguous Scope vs. Consequential Actions:**
+  - *Ambiguous Scope ("Clear my afternoon"):* A broad command where targets include internal recurring syncs and a high-stakes external client meeting. Because the user's intended treatment of the client meeting is unspecified, policy gates it for `CLARIFY`.
+  - *Explicit Consequential Request ("Cancel all afternoon meetings including the client review"):* The intent is unambiguous, but because canceling an external client meeting carries significant operational risk, policy requires `CONFIRM`.
 - **Scenario 3 — Role-Based Permission Enactment:** An unauthorized user (*"READ_ONLY"*) attempts to close an escalated ticket. The policy engine blocks the action deterministically.
 - **Scenario 4 — Partial Failure & External Drift:** A multi-step batch action fails at step 2. Step 1 is compensated, but if step 1's resource was modified by a human in the interim, the system halts compensation and alerts human supervisors.
 
@@ -55,10 +57,14 @@ Autonomous AI agents in enterprise environments face a critical reliability barr
   4. *Low-Risk Auto-Approval:* Reversible, internal, authorized, and within item count threshold. (Pass $\to$ `AUTO-APPROVE`)
 - **FR3.3:** Output one of four outcomes: `AUTO-APPROVE`, `CLARIFY`, `CONFIRM`, `BLOCK`.
 
-### FR4: Cryptographic Plan Integrity
-- **FR4.1:** Generate an immutable `plan_id` and compute an `action_hash`.
-- **FR4.2:** Compute `action_hash` via SHA-256 over canonical JSON (sorted keys, stripping runtime state fields like `status`).
-- **FR4.3:** Reject any execution request where `hash(submitted_actions) != approved_action_hash`.
+### FR4: Plan Integrity & Single-Use Replay Protection
+- **FR4.1:** Compute `action_hash` via SHA-256 over canonical JSON of the actions list (sorted keys, stripping runtime mutable fields like `status`). This provides cryptographic mismatch detection to ensure the actions to be executed match the exact actions evaluated and approved.
+- **FR4.2:** Enforce single-use replay protection: a `plan_id` can be executed exactly once. Execution is permitted only when:
+  1. The plan exists in server storage and has `status == APPROVED`.
+  2. The submitted `action_hash` matches the approved plan's stored `action_hash`.
+  3. The requesting actor matches the authorized plan actor.
+  4. Pre-execution resource freshness checks pass.
+- **FR4.3:** Immediately upon initiating execution, the plan's status transitions to `EXECUTING`. Any subsequent execution attempt with the same `plan_id` is deterministically rejected (`PLAN_ALREADY_CONSUMED`).
 
 ### FR5: State Freshness Check
 - **FR5.1:** Immediately before executing any action, re-read the target resource.
@@ -66,10 +72,11 @@ Autonomous AI agents in enterprise environments face a critical reliability barr
 
 ### FR6: Controlled Execution via MCP
 - **FR6.1:** Connect to a single MCP server hosting domain namespaces (`calendar.*`, `tickets.*`, `files.*`).
-- **FR6.2:** State-changing tools must demand `plan_id` and verified `action_hash`; the conversational agent has zero direct execution credentials.
+- **FR6.2:** In the application architecture, the conversational agent is provided only with read-only discovery and proposal tool schemas; execution capability is strictly restricted to the Controlled Executor module.
+- **FR6.3:** State-changing tools demand a validated `plan_id` and verified `action_hash`, supplied exclusively by the Controlled Executor after passing policy, replay, and freshness gates.
 
 ### FR7: Write-Ahead Action Journaling
-- **FR7.1:** Maintain an append-only SQLite journal.
+- **FR7.1:** Maintain a durable write-ahead action journal (append-only by application design) in SQLite.
 - **FR7.2:** Persist `before_state` and action parameters **prior** to tool execution (`status: executing`).
 - **FR7.3:** Persist `after_state`, tool output `result`, and `error` immediately following tool return.
 
@@ -92,7 +99,7 @@ Autonomous AI agents in enterprise environments face a critical reliability barr
   - Deterministic policy gate & plan hashing: $< 50\text{ms}$.
   - Pre-execution freshness check: $< 100\text{ms}$.
 - **NFR3: Auditability & Traceability:** Every state mutation must correlate to a user ID, actor, `plan_id`, `action_hash`, and before/after states in durable storage.
-- **NFR4: Fault Tolerance:** If power or network drops mid-sequence, the write-ahead journal enables deterministic recovery upon restart.
+- **NFR4: Fault Reconciliation:** The write-ahead journal preserves intended actions and observed execution states so incomplete or interrupted executions can be reconciled after restart. If an execution was interrupted mid-flight (e.g. tool dispatched but response unreceived), recovery reconciles the external resource's live state against the journaled `before_state` and `after_state` before deciding whether compensation or retry is required.
 - **NFR5: Modularity:** Domain capabilities must be isolatable into independent modules without altering core policy or journal engines.
 
 ---
@@ -104,8 +111,8 @@ Autonomous AI agents in enterprise environments face a critical reliability barr
 | **Language** | Core Runtime | **Python 3.11+ / 3.12** | Native async support, rich LLM SDK ecosystem, fast hackathon iteration. |
 | **Data Validation** | Schema & Contracts | **Pydantic v2** | Strict typing, fast JSON serialization, native OpenAPI & JSON schema export. |
 | **Tool Protocol** | Tool Abstraction | **Model Context Protocol (MCP)** | Standardized agent-to-tool protocol; enables modular tool namespacing. |
-| **Persistence** | Write-Ahead Journal | **SQLite + aiosqlite / SQLAlchemy** | Zero-dependency, durable, ACID transactions, easy inspectability for demos. |
-| **Hashing & Integrity**| Plan Tamper Protection | **Python `hashlib` (SHA-256)** | Standard canonical JSON serialization (`json.dumps(..., sort_keys=True)`). |
+| **Persistence** | Write-Ahead Journal | **SQLite + aiosqlite (WAL mode)** | Application-level write-ahead action lifecycle; SQLite WAL mode provides database engine concurrency and durability. |
+| **Integrity & Hashing**| Mismatch Detection | **Python `hashlib` (SHA-256)** | Canonical JSON serialization (`json.dumps(..., sort_keys=True)`) for action-list mismatch detection. |
 | **LLM Interface** | Intent & Dry Run | **LiteLLM / Gemini API / Claude SDK** | Provider-agnostic fallback support; structured outputs via JSON schema. |
 | **Web / API Server**| Orchestrator Service | **FastAPI + Uvicorn** | High performance async endpoints for demo UI and test runner integration. |
 | **Demo Interface** | Interactive UI | **Streamlit** (or Rich CLI) | Rapid interactive demoing of the 4 beats, manual drift injection, and audit view. |

@@ -37,9 +37,19 @@ CARE operates across two distinct interface boundaries:
 
 ## 2. Model Context Protocol (MCP) Tool Specification
 
-State-changing tools in CARE enforce authorization guards: they can **only** be invoked if supplied with an authorized `plan_id` and matching `action_hash`. Agents are only provided with **read-only** discovery tools.
+State-changing tools in CARE are strictly protected: they can **only** be invoked by the Controlled Executor. Supplying `(plan_id, action_hash)` does not itself grant authorization; rather, the Controlled Executor verifies server-side that:
+1. The plan exists in durable storage.
+2. The stored `plan.status == PlanStatus.APPROVED`.
+3. The plan has not already been consumed (single-use replay protection).
+4. The requesting actor and user role match the authorized plan record.
+5. Live target resources match planned `before_state` (freshness check).
+6. The submitted `action_hash` matches the approved plan's canonical action hash.
+
+Only when all six conditions pass does the executor invoke the state-changing MCP tool. The conversational agent is only provided with **read-only** discovery tool definitions in its context.
 
 ### 2.1 Calendar Tools (`calendar.*`)
+
+> *Note on Demonstration Focus:* For clean, unambiguous reversibility and compensation, the demo focuses primarily on `calendar.update_event` and `tickets.update_status` / `tickets.reopen_ticket`.
 
 #### Read-Only Tools
 
@@ -77,7 +87,7 @@ State-changing tools in CARE enforce authorization guards: they can **only** be 
 #### State-Changing Tools (Gated)
 
 ##### `calendar.update_event`
-- **Privilege Required:** `EXECUTOR` with valid `plan_id` & `action_hash`
+- **Privilege Required:** `EXECUTOR` with validated `plan_id` & `action_hash`
 - **Parameters:**
   ```json
   {
@@ -91,10 +101,10 @@ State-changing tools in CARE enforce authorization guards: they can **only** be 
 - **Metadata Declared:** `reversible: true`, `destructive: false`, `external_effect: false`
 - **Returns:** Updated `CalendarEvent` object.
 
-##### `calendar.delete_event`
-- **Privilege Required:** `EXECUTOR` with valid `plan_id` & `action_hash`
+##### `calendar.delete_event` (Optional / Non-Core)
+- **Privilege Required:** `EXECUTOR` with validated `plan_id` & `action_hash`
 - **Parameters:** `plan_id`, `action_hash`, `event_id`
-- **Metadata Declared:** `reversible: true` (soft delete with restore capability)
+- **Metadata Declared:** `reversible: true` (implemented as soft-delete/cancel with restore capability)
 
 ---
 
@@ -223,6 +233,14 @@ Base URL: `http://localhost:8000/api/v1`
     "message": "Resource state changed between planning and execution. Re-planning required."
   }
   ```
+- **Response (409 Conflict - Single-Use Replay Rejection):**
+  ```json
+  {
+    "error": "PLAN_ALREADY_CONSUMED",
+    "plan_id": "plan_982f1b8a-3e12",
+    "message": "This plan has already been executed or is currently executing. Replay is rejected."
+  }
+  ```
 
 ---
 
@@ -259,7 +277,7 @@ Base URL: `http://localhost:8000/api/v1`
 
 ```json
 {
-  "error_code": "POLICY_BLOCKED | STALE_STATE | ACTION_HASH_MISMATCH | DRIFT_DETECTED | EXECUTION_FAILED",
+  "error_code": "POLICY_BLOCKED | STALE_STATE | ACTION_HASH_MISMATCH | PLAN_ALREADY_CONSUMED | DRIFT_DETECTED | EXECUTION_FAILED",
   "message": "Human readable explanation of the failure",
   "details": {},
   "timestamp": "2026-10-01T23:00:00Z"

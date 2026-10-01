@@ -25,7 +25,7 @@
 - **Status:** Accepted
 - **Context:** Autonomous agents often combine reasoning and tool execution in a single loop (e.g. ReAct / Tool Use). When an LLM hallucinates or misinterprets an unstated assumption, it immediately executes destructive operations.
 - **Decision:** Separate the system into a **Probabilistic Interpretation Layer** (LLM produces structured intent and candidate plans) and a **Deterministic Enforcement Layer** (Policy, RBAC, Hashing, Journaling, Execution).
-- **Consequences:** The LLM never possesses direct credentials to invoke state-changing tools. All state-changing tools are gated behind the deterministic executor.
+- **Consequences:** The conversational agent is not granted execution authority in the application architecture. State-changing tools are gated behind the deterministic Controlled Executor.
 
 ---
 
@@ -45,11 +45,11 @@
 
 ---
 
-### ADR-004: Cryptographic Plan Integrity
+### ADR-004: Plan Integrity via Canonical Hashing & Single-Use Replay Protection
 - **Status:** Accepted
-- **Context:** In multi-step or asynchronous agent loops, approved plans can suffer from prompt injection, parameter tampering, or replay attacks.
-- **Decision:** When a plan is approved, bind it to a `plan_id` and compute an `action_hash` using SHA-256 over canonical JSON of the actions list (keys sorted, excluding mutable status fields). The executor recomputes this hash before executing any tool call.
-- **Consequences:** Guarantees that the actions executed are byte-for-byte identical to the actions authorized by the policy engine or user.
+- **Context:** In multi-step or asynchronous agent loops, action lists can drift or be modified between evaluation and execution, and approved plans could theoretically be resubmitted.
+- **Decision:** When a plan is approved, bind it server-side to a unique `plan_id` and compute an `action_hash` using SHA-256 over canonical JSON of the actions list (keys sorted, excluding mutable status fields). The executor asserts: (1) plan exists and is `APPROVED`, (2) submitted hash matches stored hash, (3) actor matches, and (4) resources are fresh. Enforce that `plan_id` is strictly single-use: upon initiating execution, the plan transitions to `EXECUTING` and rejects any subsequent execution attempts.
+- **Consequences:** Provides cryptographic mismatch detection proving the executed actions match the approved actions. Replay attacks are prevented via stateful consumption of `plan_id`. Authorization remains bound server-side to the stored plan record rather than treating the hash in isolation as an authorization token.
 
 ---
 
@@ -64,8 +64,8 @@
 ### ADR-006: Write-Ahead Action Journaling
 - **Status:** Accepted
 - **Context:** Multi-step agent executions frequently suffer network drops, server restarts, or tool timeouts midway through execution, leaving enterprise systems in an unknown, corrupted state.
-- **Decision:** Implement a write-ahead log in SQLite WAL mode. Before any tool call is dispatched, the intended action and its `before_state` are written to durable storage (`status: executing`). Once the tool responds, `after_state` and output results are written (`status: done`).
-- **Consequences:** Every action is traceable. In case of sudden crash or failure, the system can inspect the journal and know precisely what executed and what needs compensation.
+- **Decision:** Implement a write-ahead action journal in SQLite WAL mode. Before any tool call is dispatched, the intended action and its `before_state` are written to durable storage (`status: executing`). Once the tool responds, `after_state` and output results are written (`status: done`).
+- **Consequences:** The journal provides a durable record of intended and observed execution states, enabling structured reconciliation and compensation decisions after failure. If execution was interrupted mid-flight (e.g. tool dispatched but response unreceived), recovery reconciles the external resource's live state against the journaled before-state and after-state before deciding whether compensation or retry is appropriate.
 
 ---
 
@@ -85,11 +85,11 @@
 
 ---
 
-### ADR-009: Single Namespaced MCP Server
+### ADR-009: Single Namespaced MCP Server with Application-Level Gating
 - **Status:** Accepted
-- **Context:** Managing multiple independent MCP process daemons during a hackathon demo introduces process management overhead and port collision risks.
-- **Decision:** Host a single FastMCP server that exposes namespaced tools (`calendar.*`, `tickets.*`, `files.*`) backed by separate Python modules.
-- **Consequences:** Radically simplifies deployment and demonstration while preserving modular architecture and domain isolation.
+- **Context:** Managing multiple independent MCP process daemons during a hackathon demo introduces process management overhead and port collision risks. Additionally, MCP tool definitions need authorization controls.
+- **Decision:** Host a single FastMCP server that exposes namespaced tools (`calendar.*`, `tickets.*`, `files.*`) backed by separate Python modules. Implement application-level authorization guards on state-changing tools requiring valid plan context from the Controlled Executor.
+- **Consequences:** Radically simplifies deployment and demonstration while preserving modular architecture, domain isolation, and strict execution gating.
 
 ---
 

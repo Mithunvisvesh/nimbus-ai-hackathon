@@ -160,20 +160,21 @@ Utilizes read-only inspection tools to query current system state (e.g., reading
 ### 3. Policy & Risk Engine
 Deterministic rule evaluator operating on concrete action parameters and tool-declared metadata (`reversible`, `destructive`, `external_effect`, `affects_external_party`).
 
-### 4. Plan Integrity Layer
-Binds an approved plan to a unique `plan_id` and an immutable `action_hash`.  
-- **Canonicalization:** `action_hash` is computed using SHA-256 over canonical JSON (sorted keys, stripping dynamic runtime fields such as status).
-- **Anti-Tampering:** The executor validates that the action list received matches the approved hash byte-for-byte.
+### 4. Plan Integrity & Replay Protection Layer
+Binds an approved plan to a unique server-side `plan_id` and an immutable `action_hash`.  
+- **Action-List Mismatch Detection:** `action_hash` is computed using SHA-256 over canonical JSON (sorted keys, stripping dynamic runtime fields such as status). The executor validates that the action list to execute matches the approved plan byte-for-byte.
+- **Single-Use Replay Protection:** A `plan_id` is strictly single-use. Upon execution commencement, the plan transitions to `EXECUTING` state, deterministically rejecting subsequent execution attempts. Authorization remains anchored to the stored approved plan record, not the hash in isolation.
 
 ### 5. Write-Ahead Action Journal
-Maintains an append-only, durable log (SQLite) tracking the lifecycle of every operation:
+Maintains a durable action journal in SQLite (append-only by application design, leveraging SQLite WAL mode for concurrency) tracking the lifecycle of every operation:
 1. **Pre-Write:** Logs `planned` action, parameters, and baseline `before_state`.
 2. **Execution:** Transitions status to `executing`.
 3. **Post-Write:** Logs resulting `after_state`, tool output `result`, or runtime `error`.
 4. **Recovery Log:** Tracks compensation execution, completed compensations, and drift alerts.
 
 ### 6. Controlled Executor
-The only component possessing write/execute privileges against system tools. Enforces two mandatory barriers before invoking any write tool:
+The only component possessing write/execute authority against system tools in the application architecture. Enforces mandatory barriers before invoking any write tool:
+- **Authorization & Single-Use Check:** Plan exists, is `APPROVED`, and has not been previously consumed.
 - **Integrity Validation:** `hash(actions) == approved_action_hash`.
 - **State Freshness Check:** Re-reads resource state immediately before execution; if `live_state != before_state`, aborts execution and requests re-planning.
 
