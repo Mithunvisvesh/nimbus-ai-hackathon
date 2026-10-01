@@ -74,7 +74,7 @@ CARE enforces a clear division of responsibility:
                 │
                 ▼
       ┌──────────────────┐
-      │Controlled Executor│ ◄── Executes authorized MCP tools (Only authorized executor holds credentials)
+      │Controlled Executor│ ◄── Executes authorized MCP tools (State-changing execution capability is restricted to the Controlled Executor)
       └─────────┬────────┘
                 │
                 ▼

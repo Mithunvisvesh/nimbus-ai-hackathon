@@ -335,4 +335,4 @@ A `plan_id` can be executed **exactly once**. The Controlled Executor strictly a
 4. Requesting actor and role match the authorized plan record.
 5. Live target resources match `before_state` (freshness check).
 
-Immediately upon satisfying these conditions, the executor transitions `plan.status` to `EXECUTING`. Any subsequent submission of `(plan_id, action_hash)` will fail with `PLAN_ALREADY_CONSUMED`, completely preventing replay.
+Immediately upon satisfying these conditions, the executor transitions `plan.status` to `EXECUTING`. Any subsequent submission of `(plan_id, action_hash)` will fail with `PLAN_ALREADY_CONSUMED`, providing application-level single-use plan replay protection.
