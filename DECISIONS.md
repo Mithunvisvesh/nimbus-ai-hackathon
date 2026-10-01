@@ -88,7 +88,7 @@
 ### ADR-009: Single Namespaced MCP Server with Application-Level Gating
 - **Status:** Accepted
 - **Context:** Managing multiple independent MCP process daemons during a hackathon demo introduces process management overhead and port collision risks. Additionally, MCP tool definitions need authorization controls.
-- **Decision:** Host a single FastMCP server that exposes namespaced tools (`calendar.*`, `tickets.*`, `files.*`) backed by separate Python modules. Implement application-level authorization guards on state-changing tools requiring valid plan context from the Controlled Executor.
+- **Decision:** Host a single actual FastMCP server that exposes the implemented namespaced tools (`calendar.*`, `tickets.*`) backed by the existing domain modules. Before a mutation reaches a domain store, the server validates the persisted executing/recovering plan, canonical hash, action ID, exact operation/resource/parameters, write-ahead journal status, and a one-time capability hash issued by the Controlled Executor or recovery runner. Domain stores additionally require an internal server token. The files namespace remains future scope because no file operations currently exist.
 - **Consequences:** Radically simplifies deployment and demonstration while preserving modular architecture, domain isolation, and strict execution gating.
 
 ---

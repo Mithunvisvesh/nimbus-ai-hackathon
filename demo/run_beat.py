@@ -9,6 +9,7 @@ Usage:
 """
 
 import argparse
+import secrets
 import sys
 from pathlib import Path
 
@@ -206,6 +207,7 @@ def run_beat_4():
         status=PlanStatus.APPROVED,
     )
     journal.save_approved_plan(plan)
+    journal.transition_plan_to_executing(plan_id)
 
     print("\n1. Step 1 executes: Calendar moved to 16:00:00Z.")
     rec1 = journal.log_pre_action(
@@ -220,8 +222,10 @@ def run_beat_4():
         before_state=actions[0].before_state,
         compensation_action=actions[0].compensation_action.model_dump(),
     )
-    mcp.dispatch_tool(operation=actions[0].operation, parameters=actions[0].parameters, plan_id=plan_id, action_hash=action_hash)
-    journal.log_post_action_success(record_id=rec1, after_state={"start_time": "2026-10-02T16:00:00Z"})
+    dispatch_token = secrets.token_urlsafe(32)
+    journal.prepare_tool_dispatch(rec1, dispatch_token)
+    mcp.dispatch_tool(operation=actions[0].operation, parameters=actions[0].parameters, plan_id=plan_id, action_hash=action_hash, action_id=actions[0].action_id, dispatch_token=dispatch_token)
+    journal.log_post_action_success(record_id=rec1, after_state=mcp.get_calendar_event(actions[0].resource_id))
 
     print("2. External human drift occurs: Colleague reschedules 'evt_3pm_sync' to 16:45:00Z.")
     mcp.calendar_store.events["evt_3pm_sync"]["start_time"] = "2026-10-02T16:45:00Z"

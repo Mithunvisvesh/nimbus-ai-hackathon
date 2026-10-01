@@ -9,6 +9,7 @@ Asserts pre-compensation drift check before every rollback operation:
 """
 
 from typing import Any, Dict, List, Optional
+import secrets
 from pydantic import BaseModel, Field
 
 from src.schemas.plan import PlanStatus
@@ -16,6 +17,7 @@ from src.schemas.journal import ActionJournalStatus, JournalRecord
 from src.journal.db import ActionJournalDB
 from src.mcp.server import CareMCPServer
 from src.recovery.drift_detector import DriftDetector, DriftResult
+from src.mcp.fastmcp_server import create_fastmcp_server, call_fastmcp_tool_sync
 
 
 class CompensatedStep(BaseModel):
@@ -38,9 +40,10 @@ class SagaCompensationResult(BaseModel):
 class SagaCompensationRunner:
     """Executes backward saga compensation with drift protection."""
 
-    def __init__(self, journal_db: ActionJournalDB, mcp_server: CareMCPServer):
+    def __init__(self, journal_db: ActionJournalDB, mcp_server: CareMCPServer, mcp_protocol=None):
         self.journal = journal_db
         self.mcp = mcp_server
+        self.mcp_protocol = mcp_protocol or create_fastmcp_server(mcp_server, journal_db)
         self.drift_detector = DriftDetector(mcp_server=mcp_server, journal_db=journal_db)
 
     def compensate_plan(
@@ -131,11 +134,19 @@ class SagaCompensationRunner:
 
             # 4. Dispatch compensation action via MCP
             try:
-                comp_result = self.mcp.dispatch_tool(
-                    operation=comp_op,
-                    parameters=comp_params,
-                    plan_id=plan_id,
-                    action_hash=record.action_hash,
+                dispatch_token = secrets.token_urlsafe(32)
+                self.journal.prepare_compensation_dispatch(plan_id, record.action_id, dispatch_token)
+                comp_result = call_fastmcp_tool_sync(
+                    self.mcp_protocol,
+                    comp_op,
+                    {
+                        "plan_id": plan_id,
+                        "action_hash": record.action_hash,
+                        "action_id": record.action_id,
+                        "dispatch_token": dispatch_token,
+                        **comp_params,
+                        "dispatch_kind": "compensate",
+                    },
                 )
 
                 # 5. Mark journal record as COMPENSATED

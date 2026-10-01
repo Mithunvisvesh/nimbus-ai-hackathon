@@ -1,5 +1,6 @@
 import json
 import sys
+import secrets
 from pathlib import Path
 
 # Add project root to sys.path
@@ -172,6 +173,7 @@ def run_beat4_demo():
         status=PlanStatus.APPROVED,
     )
     journal_db.save_approved_plan(plan)
+    journal_db.transition_plan_to_executing(plan_id)
 
     print("\n[PART A: STEP 1 EXECUTION]")
     rec1 = journal_db.log_pre_action(
@@ -186,15 +188,19 @@ def run_beat4_demo():
         before_state=actions[0].before_state,
         compensation_action=actions[0].compensation_action.model_dump(),
     )
+    dispatch_token = secrets.token_urlsafe(32)
+    journal_db.prepare_tool_dispatch(rec1, dispatch_token)
     mcp_server.dispatch_tool(
         operation=actions[0].operation,
         parameters=actions[0].parameters,
         plan_id=plan_id,
         action_hash=action_hash,
+        action_id=actions[0].action_id,
+        dispatch_token=dispatch_token,
     )
     journal_db.log_post_action_success(
         record_id=rec1,
-        after_state={"start_time": "2026-10-02T16:00:00Z"},
+        after_state=mcp_server.get_calendar_event(actions[0].resource_id),
     )
     print(">> Step 1 (Calendar Update) executed successfully -> Moved to 16:00 (4:00 PM).")
 

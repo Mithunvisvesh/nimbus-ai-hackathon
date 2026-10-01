@@ -48,7 +48,11 @@ class TicketsDomainStore:
     def __init__(self, seed_file: Optional[Path | str] = None):
         self.seed_file = Path(seed_file or SEED_PATH)
         self.tickets: Dict[str, Dict[str, Any]] = {}
+        self._authorization_token: object | None = None
         self.reset()
+
+    def _bind_authorization_token(self, token: object) -> None:
+        self._authorization_token = token
 
     def reset(self) -> None:
         """Reloads store from seed json."""
@@ -87,11 +91,14 @@ class TicketsDomainStore:
         plan_id: Optional[str] = None,
         action_hash: Optional[str] = None,
         simulate_failure: bool = False,
+        _authorization_token: object | None = None,
     ) -> Dict[str, Any]:
         """Gated state-changing tool to update ticket status."""
         if simulate_failure:
             raise RuntimeError(f"Simulated execution failure for tool tickets.update_status on {ticket_id}")
 
+        if _authorization_token is None or _authorization_token is not self._authorization_token:
+            raise PermissionError("Ticket mutation must be authorized by the CARE MCP server.")
         if not plan_id or not action_hash:
             raise PermissionError("Direct unauthorized mutation rejected: plan_id and action_hash required.")
 
@@ -114,6 +121,7 @@ class TicketsDomainStore:
         plan_id: Optional[str] = None,
         action_hash: Optional[str] = None,
         simulate_failure: bool = False,
+        _authorization_token: object | None = None,
     ) -> Dict[str, Any]:
         """Gated state-changing tool to reopen a ticket."""
         return self.update_status(
@@ -124,4 +132,5 @@ class TicketsDomainStore:
             plan_id=plan_id,
             action_hash=action_hash,
             simulate_failure=simulate_failure,
+            _authorization_token=_authorization_token,
         )

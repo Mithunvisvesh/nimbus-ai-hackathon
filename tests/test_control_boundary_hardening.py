@@ -1,4 +1,6 @@
 import tempfile
+import asyncio
+import secrets
 from pathlib import Path
 
 import pytest
@@ -15,13 +17,17 @@ from src.schemas.plan import (
     CompensationAction, RiskLevel,
 )
 from src.executor.runner import ControlledExecutor
+import src.executor.runner as executor_module
 from src.recovery.compensation import SagaCompensationRunner
+from src.mcp.fastmcp_server import create_fastmcp_server
+from fastmcp import Client
 
 
 def _setup():
     tmp = tempfile.TemporaryDirectory()
     mcp = CareMCPServer(calendar_store=CalendarDomainStore())
     journal = ActionJournalDB(Path(tmp.name) / "journal.db")
+    mcp.bind_journal(journal)
     return tmp, mcp, journal
 
 
@@ -158,17 +164,138 @@ def test_recovery_reconciles_interrupted_action_before_compensating():
             status=PlanStatus.APPROVED,
         )
         journal.save_approved_plan(plan)
+        journal.transition_plan_to_executing(plan.plan_id)
         record_id = journal.log_pre_action(
             plan_id=plan.plan_id, action_id=action.action_id, action_hash=plan.action_hash,
             actor=plan.actor, user_role=plan.user_role, resource_type=action.resource_type,
             resource_id=action.resource_id, operation=action.operation,
             before_state=before, compensation_action=action.compensation_action.model_dump(),
         )
-        mcp.dispatch_tool(action.operation, action.parameters, plan.plan_id, plan.action_hash)
+        dispatch_token = secrets.token_urlsafe(32)
+        journal.prepare_tool_dispatch(record_id, dispatch_token)
+        mcp.dispatch_tool(action.operation, action.parameters, plan.plan_id, plan.action_hash, action_id=action.action_id, dispatch_token=dispatch_token)
 
         result = SagaCompensationRunner(journal, mcp).compensate_plan(plan.plan_id)
         assert result.status == "compensated"
         assert mcp.get_ticket("tkt_105") == before
         assert journal.get_journal_records(plan.plan_id)[0].status.value == "compensated"
+    finally:
+        tmp.cleanup()
+
+
+def test_lost_mcp_response_reconciles_and_compensates_completed_mutation(monkeypatch):
+    tmp, mcp, journal = _setup()
+    try:
+        before = mcp.get_ticket("tkt_105")
+        action = PlannedAction(
+            action_id="lost-response-action", resource_type="tickets", resource_id="tkt_105",
+            operation="tickets.update_status",
+            parameters={"ticket_id": "tkt_105", "new_status": "closed"},
+            before_state=before,
+            compensation_action=CompensationAction(
+                operation="tickets.update_status",
+                parameters={"ticket_id": "tkt_105", "new_status": before["status"]},
+            ),
+        )
+        plan = CandidatePlan(
+            plan_id="lost-response-plan",
+            intent=StructuredIntent(goal="Close ticket", scope="tickets"),
+            actor="user", user_role="ADMIN", actions=[action],
+            action_hash=compute_action_hash([action]),
+            policy_outcome=PolicyOutcome.AUTO_APPROVE, status=PlanStatus.APPROVED,
+        )
+        journal.save_approved_plan(plan)
+        executor = ControlledExecutor(journal, mcp)
+        original_call = executor_module.call_fastmcp_tool_sync
+        call_count = 0
+
+        def lose_first_response(protocol, name, arguments):
+            nonlocal call_count
+            call_count += 1
+            result = original_call(protocol, name, arguments)
+            if call_count == 1:
+                raise executor_module.UnknownMCPOutcomeError("simulated lost MCP response")
+            return result
+
+        monkeypatch.setattr(executor_module, "call_fastmcp_tool_sync", lose_first_response)
+        with pytest.raises(RuntimeError, match="simulated lost MCP response"):
+            executor.execute_plan(plan.plan_id, plan.action_hash)
+
+        assert call_count == 1  # The executor received the simulated lost response once.
+        assert mcp.get_ticket("tkt_105") == before
+        assert journal.get_plan(plan.plan_id)["status"] == PlanStatus.COMPENSATED.value
+        records = journal.get_journal_records(plan.plan_id)
+        assert records[0].status.value == "compensated"
+    finally:
+        tmp.cleanup()
+
+
+def test_mutation_boundary_requires_exact_executing_action_binding():
+    tmp, mcp, journal = _setup()
+    try:
+        executor = ControlledExecutor(journal, mcp)
+        plan = DryRunPlanner(mcp).generate_candidate_plan(IntentParser(False).parse("Move 3 PM meeting to 4 PM"))
+        action = plan.actions[0]
+        plan.policy_outcome = PolicyOutcome.AUTO_APPROVE
+        plan.status = PlanStatus.APPROVED
+        journal.save_approved_plan(plan)
+
+        before = mcp.get_calendar_event(action.resource_id)
+        assert mcp.list_calendar_events()
+        with pytest.raises(PermissionError):
+            mcp.dispatch_tool(action.operation, action.parameters, "fabricated", "fake", action_id=action.action_id)
+        with pytest.raises(PermissionError):
+            mcp.calendar_store.update_event(action.resource_id, title="forged", plan_id="fake", action_hash="fake")
+        assert mcp.get_calendar_event(action.resource_id) == before
+
+        journal.transition_plan_to_executing(plan.plan_id)
+        record_id = journal.log_pre_action(
+            plan_id=plan.plan_id, action_id=action.action_id, action_hash=plan.action_hash,
+            actor=plan.actor, user_role=plan.user_role, resource_type=action.resource_type,
+            resource_id=action.resource_id, operation=action.operation,
+            before_state=action.before_state, compensation_action=action.compensation_action.model_dump(),
+        )
+        dispatch_token = secrets.token_urlsafe(32)
+        journal.prepare_tool_dispatch(record_id, dispatch_token)
+        with pytest.raises(PermissionError):
+            mcp.dispatch_tool(action.operation, action.parameters, plan.plan_id, "wrong", action_id=action.action_id)
+        with pytest.raises(PermissionError):
+            mcp.dispatch_tool("tickets.update_status", action.parameters, plan.plan_id, plan.action_hash, action_id=action.action_id)
+        with pytest.raises(PermissionError):
+            mcp.dispatch_tool(action.operation, {**action.parameters, "event_id": "other"}, plan.plan_id, plan.action_hash, action_id=action.action_id)
+        with pytest.raises(PermissionError):
+            mcp.dispatch_tool(action.operation, {**action.parameters, "title": "forged"}, plan.plan_id, plan.action_hash, action_id=action.action_id)
+
+        result = mcp.dispatch_tool(action.operation, action.parameters, plan.plan_id, plan.action_hash, action_id=action.action_id, dispatch_token=dispatch_token)
+        assert result["start_time"] == action.parameters["start_time"]
+        with pytest.raises(PermissionError, match="claimed or consumed"):
+            mcp.dispatch_tool(action.operation, action.parameters, plan.plan_id, plan.action_hash, action_id=action.action_id, dispatch_token=dispatch_token)
+        assert executor is not None
+    finally:
+        tmp.cleanup()
+
+
+def test_fastmcp_protocol_exposes_namespaced_discovery_and_rejects_fake_mutations():
+    tmp, mcp, journal = _setup()
+    try:
+        protocol = create_fastmcp_server(mcp, journal)
+
+        async def exercise_protocol():
+            async with Client(protocol) as client:
+                tools = await client.list_tools()
+                names = {tool.name for tool in tools}
+                assert "calendar.list_events" in names
+                assert "calendar.update_event" in names
+                assert "tickets.list_tickets" in names
+                assert "care.get_tool_metadata" in names
+                events = await client.call_tool("calendar.list_events", {})
+                assert not events.is_error
+                rejected = await client.call_tool("calendar.update_event", {
+                    "plan_id": "fake", "action_hash": "fake", "action_id": "fake",
+                    "event_id": "evt_3pm_sync", "start_time": "2026-10-02T16:00:00Z",
+                }, raise_on_error=False)
+                assert rejected.is_error
+
+        asyncio.run(exercise_protocol())
     finally:
         tmp.cleanup()

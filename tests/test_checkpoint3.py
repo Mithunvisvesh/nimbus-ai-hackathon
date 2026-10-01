@@ -16,6 +16,7 @@ Verifies Phase 3 Gate Criteria (DoD):
 """
 
 import tempfile
+import secrets
 from pathlib import Path
 import pytest
 
@@ -214,6 +215,7 @@ def test_beat4_multi_domain_failure_and_drift_halts_rollback(test_env):
         status=PlanStatus.APPROVED,
     )
     journal.save_approved_plan(plan, explicit_confirmation=True)
+    journal.transition_plan_to_executing(plan_id)
 
     # 1. Step 1 executes successfully through ControlledExecutor
     # 2. Before Step 2, an external human edits the calendar event to 16:45 directly
@@ -234,15 +236,19 @@ def test_beat4_multi_domain_failure_and_drift_halts_rollback(test_env):
         before_state=actions[0].before_state,
         compensation_action=actions[0].compensation_action.model_dump(),
     )
+    dispatch_token = secrets.token_urlsafe(32)
+    journal.prepare_tool_dispatch(rec_id1, dispatch_token)
     res1 = mcp.dispatch_tool(
         operation=actions[0].operation,
         parameters=actions[0].parameters,
         plan_id=plan_id,
         action_hash=action_hash,
+        action_id=actions[0].action_id,
+        dispatch_token=dispatch_token,
     )
     journal.log_post_action_success(
         record_id=rec_id1,
-        after_state={"start_time": "2026-10-02T16:00:00Z"},
+        after_state=mcp.get_calendar_event(actions[0].resource_id),
         result=res1,
     )
 

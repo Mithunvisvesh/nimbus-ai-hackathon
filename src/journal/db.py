@@ -1,5 +1,7 @@
 import sqlite3
 import json
+import hashlib
+import hmac
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -62,7 +64,18 @@ class ActionJournalDB:
                 timestamp TEXT NOT NULL,
                 result TEXT,
                 error TEXT,
+                dispatch_claimed INTEGER NOT NULL DEFAULT 0,
+                dispatch_secret_hash TEXT,
+                compensation_secret_hash TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE TABLE IF NOT EXISTS action_dispatch_claims (
+                plan_id TEXT NOT NULL,
+                action_id TEXT NOT NULL,
+                dispatch_kind TEXT NOT NULL,
+                claimed_at TEXT NOT NULL,
+                PRIMARY KEY (plan_id, action_id, dispatch_kind)
             );
 
             CREATE TABLE IF NOT EXISTS drift_incidents (
@@ -85,6 +98,121 @@ class ActionJournalDB:
             plan_columns = {row["name"] for row in conn.execute("PRAGMA table_info(approved_plans)")}
             if "intent_json" not in plan_columns:
                 conn.execute("ALTER TABLE approved_plans ADD COLUMN intent_json TEXT")
+            journal_columns = {row["name"] for row in conn.execute("PRAGMA table_info(journal_records)")}
+            if "dispatch_claimed" not in journal_columns:
+                conn.execute("ALTER TABLE journal_records ADD COLUMN dispatch_claimed INTEGER NOT NULL DEFAULT 0")
+            if "dispatch_secret_hash" not in journal_columns:
+                conn.execute("ALTER TABLE journal_records ADD COLUMN dispatch_secret_hash TEXT")
+            if "compensation_secret_hash" not in journal_columns:
+                conn.execute("ALTER TABLE journal_records ADD COLUMN compensation_secret_hash TEXT")
+
+    def prepare_tool_dispatch(self, record_id: int, dispatch_token: str) -> None:
+        token_hash = hashlib.sha256(dispatch_token.encode("utf-8")).hexdigest()
+        with self._get_connection() as conn:
+            cur = conn.execute(
+                "UPDATE journal_records SET dispatch_secret_hash = ? WHERE record_id = ? AND status = ? AND dispatch_claimed = 0",
+                (token_hash, record_id, ActionJournalStatus.EXECUTING.value),
+            )
+            if cur.rowcount != 1:
+                raise RuntimeError("Unable to prepare one-time executor dispatch authorization.")
+
+    def prepare_compensation_dispatch(self, plan_id: str, action_id: str, dispatch_token: str) -> None:
+        token_hash = hashlib.sha256(dispatch_token.encode("utf-8")).hexdigest()
+        with self._get_connection() as conn:
+            cur = conn.execute(
+                "UPDATE journal_records SET compensation_secret_hash = ? WHERE plan_id = ? AND action_id = ? AND status = ? AND after_state IS NOT NULL",
+                (token_hash, plan_id, action_id, ActionJournalStatus.DONE.value),
+            )
+            if cur.rowcount != 1:
+                raise RuntimeError("Unable to prepare one-time compensation authorization.")
+
+    def authorize_and_claim_tool_call(
+        self,
+        *,
+        plan_id: str,
+        action_hash: str,
+        action_id: str,
+        operation: str,
+        resource_id: str,
+        parameters: Dict[str, Any],
+        dispatch_token: Optional[str] = None,
+        dispatch_kind: str = "execute",
+    ) -> None:
+        """Atomically authorize one exact planned call at the mutation boundary."""
+        if dispatch_kind not in ("execute", "compensate"):
+            raise PermissionError("Unsupported tool dispatch kind.")
+        expected_plan_status = PlanStatus.EXECUTING.value if dispatch_kind == "execute" else PlanStatus.RECOVERING.value
+        with self._get_connection() as conn:
+            row = conn.execute("SELECT * FROM approved_plans WHERE plan_id = ?", (plan_id,)).fetchone()
+            if not row:
+                raise PermissionError("Unknown plan_id; mutation rejected.")
+            if row["status"] != expected_plan_status:
+                raise PermissionError(f"Plan is not authorized for {dispatch_kind} (status={row['status']}).")
+            if row["action_hash"] != action_hash:
+                raise PermissionError("action_hash does not match the persisted plan.")
+            if row["policy_outcome"] not in (PolicyOutcome.AUTO_APPROVE.value, PolicyOutcome.CONFIRM.value):
+                raise PermissionError("Persisted policy outcome does not authorize state changes.")
+            actions = json.loads(row["actions_json"])
+            from src.integrity.hasher import compute_action_hash
+            if compute_action_hash(actions) != row["action_hash"]:
+                raise PermissionError("Persisted action list does not match its canonical action hash.")
+            action = next((item for item in actions if item.get("action_id") == action_id), None)
+            if action is None:
+                raise PermissionError("action_id is not present in the persisted plan.")
+            if dispatch_kind == "execute":
+                matches = (
+                    action.get("operation") == operation
+                    and action.get("resource_id") == resource_id
+                    and action.get("parameters", {}) == parameters
+                )
+                if not matches:
+                    raise PermissionError("Tool operation, resource, or parameters do not match the approved action.")
+                journal_row = conn.execute(
+                    "SELECT record_id, dispatch_secret_hash, dispatch_claimed FROM journal_records WHERE plan_id = ? AND action_id = ? AND status = ? ORDER BY record_id DESC LIMIT 1",
+                    (plan_id, action_id, ActionJournalStatus.EXECUTING.value),
+                ).fetchone()
+                if not journal_row:
+                    raise PermissionError("Write-ahead executing journal record is required before tool dispatch.")
+                if journal_row["dispatch_claimed"]:
+                    raise PermissionError("Action has already been claimed or consumed.")
+                token_hash = hashlib.sha256(dispatch_token.encode("utf-8")).hexdigest() if dispatch_token else ""
+                if not journal_row["dispatch_secret_hash"] or not hmac.compare_digest(journal_row["dispatch_secret_hash"], token_hash):
+                    raise PermissionError("A valid one-time Controlled Executor dispatch token is required.")
+                cur = conn.execute(
+                    "UPDATE journal_records SET dispatch_claimed = 1, dispatch_secret_hash = NULL WHERE record_id = ? AND status = ? AND dispatch_claimed = 0 AND dispatch_secret_hash = ?",
+                    (journal_row["record_id"], ActionJournalStatus.EXECUTING.value, token_hash),
+                )
+                if cur.rowcount != 1:
+                    raise PermissionError("Action has already been claimed or consumed.")
+                return
+
+            compensation = action.get("compensation_action") or {}
+            if compensation.get("operation") != operation or compensation.get("parameters", {}) != parameters:
+                raise PermissionError("Compensation operation or parameters do not match the approved action.")
+            if action.get("resource_id") != resource_id:
+                raise PermissionError("Compensation resource does not match the approved action.")
+            journal_row = conn.execute(
+                "SELECT record_id, compensation_secret_hash FROM journal_records WHERE plan_id = ? AND action_id = ? AND status = ? AND after_state IS NOT NULL",
+                (plan_id, action_id, ActionJournalStatus.DONE.value),
+            ).fetchone()
+            if not journal_row:
+                raise PermissionError("Only a completed, journaled action can be compensated.")
+            token_hash = hashlib.sha256(dispatch_token.encode("utf-8")).hexdigest() if dispatch_token else ""
+            if not journal_row["compensation_secret_hash"] or not hmac.compare_digest(journal_row["compensation_secret_hash"], token_hash):
+                raise PermissionError("A valid one-time recovery dispatch token is required.")
+            try:
+                conn.execute(
+                    "INSERT INTO action_dispatch_claims (plan_id, action_id, dispatch_kind, claimed_at) VALUES (?, ?, ?, ?)",
+                    (plan_id, action_id, dispatch_kind, datetime.now(timezone.utc).isoformat()),
+                )
+                cur = conn.execute(
+                    "UPDATE journal_records SET compensation_secret_hash = NULL WHERE record_id = ? AND compensation_secret_hash = ?",
+                    (journal_row["record_id"], token_hash),
+                )
+                if cur.rowcount != 1:
+                    raise PermissionError("Compensation token was already consumed.")
+            except sqlite3.IntegrityError as exc:
+                raise PermissionError("Compensation has already been claimed or consumed.") from exc
 
     def save_approved_plan(self, plan: CandidatePlan, explicit_confirmation: bool = False) -> None:
         """Stores an approved candidate plan for cryptographic binding and replay control."""
@@ -94,6 +222,9 @@ class ActionJournalDB:
             raise ValueError("A confirm-required plan needs an explicit human confirmation before approval.")
         if not plan.actions or not plan.action_hash:
             raise ValueError("An approved plan must contain actions and a canonical action hash.")
+        action_ids = [action.action_id for action in plan.actions]
+        if len(action_ids) != len(set(action_ids)):
+            raise ValueError("Action IDs in an approved plan must be unique.")
         from src.integrity.hasher import compute_action_hash
         if compute_action_hash(plan.actions) != plan.action_hash:
             raise ValueError("Plan action_hash does not match its actions.")
@@ -236,6 +367,14 @@ class ActionJournalDB:
                 WHERE record_id = ?
                 """,
                 (error_msg, ActionJournalStatus.FAILED.value, record_id),
+            )
+
+    def log_post_action_unknown(self, record_id: int, error_msg: str) -> None:
+        """Mark an outcome uncertain when MCP may have run but its response was lost."""
+        with self._get_connection() as conn:
+            conn.execute(
+                "UPDATE journal_records SET error = ?, status = ? WHERE record_id = ? AND status = ?",
+                (error_msg, ActionJournalStatus.UNKNOWN.value, record_id, ActionJournalStatus.EXECUTING.value),
             )
 
     def get_journal_records(self, plan_id: str) -> List[JournalRecord]:

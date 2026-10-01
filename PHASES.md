@@ -4,6 +4,11 @@
 **Event:** NIMBUS Hackathon 2026  
 **Execution Window:** Overnight Hackathon Sprint (Rounds 1 $\to$ Round 2 $\to$ Final Prototype)  
 
+### Current Prototype Status (2026-10-02)
+- Checkpoints 1–4 are implemented in the local prototype; the test suite passes.
+- The tool layer now uses FastMCP. Mutation authorization is bound to persisted actions and one-time executor/recovery capabilities.
+- The real LLM provider integration is still teammate-owned and is not complete; cached and deterministic offline parsing remain available.
+
 ---
 
 ## 1. Team Ownership & Responsibilities

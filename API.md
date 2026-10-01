@@ -9,14 +9,12 @@
 
 ## 1. Architectural Overview
 
-CARE operates across two distinct interface boundaries:
-1. **The External / UI Orchestrator REST API (FastAPI):** High-level endpoints coordinating parsing, dry run, policy gating, execution, and audit queries.
-2. **The Model Context Protocol (MCP) Server:** Standardized tool server providing namespaced domain capabilities (`calendar.*`, `tickets.*`, `files.*`) with privilege enforcement.
+CARE's intended interface boundaries are documented here. The current prototype implements the FastMCP server and its calendar/ticket namespaces; the FastAPI REST orchestrator shown below is a design specification and has no runtime entry point yet. A files namespace is also outside the current prototype scope.
 
 ```
  [User / Streamlit UI]
            │
-           ▼ (HTTP JSON REST)
+           ▼ (HTTP JSON REST — design specification; not currently implemented)
  ┌────────────────────────┐
  │ Orchestrator REST API  │
  └─────────┬──────────────┘
@@ -26,7 +24,7 @@ CARE operates across two distinct interface boundaries:
  │   Controlled Executor  │
  └─────────┬──────────────┘
            │
-           ▼ (MCP Tool Protocol with plan_id & action_hash)
+           ▼ (MCP protocol; executor supplies its one-time dispatch capability)
  ┌────────────────────────┐
  │    CARE MCP Server     │
  │ (calendar / tickets)   │
@@ -37,18 +35,19 @@ CARE operates across two distinct interface boundaries:
 
 ## 2. Model Context Protocol (MCP) Tool Specification
 
-State-changing tools in CARE are strictly protected: they can **only** be invoked by the Controlled Executor. Supplying `(plan_id, action_hash)` does not itself grant authorization; rather, the Controlled Executor verifies server-side that:
-1. The plan exists in durable storage.
-2. The stored `plan.status == PlanStatus.APPROVED`.
-3. The plan has not already been consumed (single-use replay protection).
-4. The requesting actor and user role match the authorized plan record.
-5. Live target resources match planned `before_state` (freshness check).
-6. The submitted `action_hash` matches the approved plan's canonical action hash.
-7. The stored policy outcome is executable (`AUTO_APPROVE` or `CONFIRM`); confirmation-required plans must pass the explicit confirmation step before storage.
-8. Post-action and plan-level invariants pass before the plan is marked `DONE`.
-9. During recovery, any `EXECUTING` or `UNKNOWN` journal entries are reconciled against their before and predicted after states before compensation proceeds; unresolved drift halts rollback for human review.
+State-changing tools are exposed by the FastMCP server but cannot be authorized by caller-supplied plan identifiers alone. Before dispatch, the Controlled Executor validates approval, re-evaluates deterministic policy, checks the canonical action hash and resource freshness, atomically transitions the plan from `APPROVED` to `EXECUTING`, and writes `before_state` to the journal. It then sends the exact planned operation, resource, parameters, action ID, and a one-time dispatch capability to the MCP tool.
 
-Only when all six conditions pass does the executor invoke the state-changing MCP tool. The conversational agent is only provided with **read-only** discovery tool definitions in its context.
+At the mutation boundary, the server checks that:
+
+1. The plan exists, has an executable policy outcome, and is in `EXECUTING` (or `RECOVERING` for compensation).
+2. The supplied hash matches both the persisted plan hash and its canonical action list.
+3. The action ID, operation, resource, and parameters exactly match the persisted action (or its predefined compensation).
+4. A matching write-ahead journal record exists in the required state.
+5. The one-time executor or recovery capability matches its server-stored hash and has not been consumed.
+
+After dispatch, the executor records the result, runs per-action and plan-level invariant checks, and invokes drift-checked compensation on failure where safe. Recovery reconciles `EXECUTING`/`UNKNOWN` journal records before compensating. Read-only discovery tools remain available without mutation authorization.
+
+FastMCP server entry point: `python -m src.mcp.fastmcp_server` (stdio transport).
 
 ### 2.1 Calendar Tools (`calendar.*`)
 
@@ -90,12 +89,14 @@ Only when all six conditions pass does the executor invoke the state-changing MC
 #### State-Changing Tools (Gated)
 
 ##### `calendar.update_event`
-- **Privilege Required:** `EXECUTOR` with validated `plan_id` & `action_hash`
+- **Privilege Required:** The executor supplies the exact approved action and one-time dispatch capability. Caller-supplied `plan_id` and `action_hash` alone are insufficient.
 - **Parameters:**
   ```json
   {
     "plan_id": "plan_982f1b8a-3e12",
-    "action_hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "action_hash": "<persisted approved action hash>",
+    "action_id": "act_001",
+    "dispatch_token": "<one-time executor capability>",
     "event_id": "evt_3pm_sync",
     "start_time": "2026-10-02T17:00:00Z",
     "end_time": "2026-10-02T17:30:00Z"
@@ -104,10 +105,7 @@ Only when all six conditions pass does the executor invoke the state-changing MC
 - **Metadata Declared:** `reversible: true`, `destructive: false`, `external_effect: false`
 - **Returns:** Updated `CalendarEvent` object.
 
-##### `calendar.delete_event` (Optional / Non-Core)
-- **Privilege Required:** `EXECUTOR` with validated `plan_id` & `action_hash`
-- **Parameters:** `plan_id`, `action_hash`, `event_id`
-- **Metadata Declared:** `reversible: true` (implemented as soft-delete/cancel with restore capability)
+`calendar.delete_event` is not implemented in the current prototype.
 
 ---
 
@@ -126,12 +124,14 @@ Only when all six conditions pass does the executor invoke the state-changing MC
 #### State-Changing Tools (Gated)
 
 ##### `tickets.update_status`
-- **Privilege Required:** `EXECUTOR` with valid `plan_id` & `action_hash`
+- **Privilege Required:** The executor supplies the exact approved action and one-time dispatch capability. Caller-supplied `plan_id` and `action_hash` alone are insufficient.
 - **Parameters:**
   ```json
   {
     "plan_id": "plan_982f1b8a-3e12",
-    "action_hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "action_hash": "<persisted approved action hash>",
+    "action_id": "act_001",
+    "dispatch_token": "<one-time executor capability>",
     "ticket_id": "tkt_402",
     "new_status": "closed",
     "resolution_notes": "Resolved payment timeout."
@@ -142,13 +142,15 @@ Only when all six conditions pass does the executor invoke the state-changing MC
 
 ---
 
-## 3. Orchestrator Engine REST API
+## 3. Orchestrator Engine REST API (Design Specification Only)
+
+The following HTTP endpoints are planned interface documentation, not implemented routes. The current runnable mutation path is through the Controlled Executor and FastMCP server described above. The available parser uses cached responses and deterministic fallback patterns; real LLM provider integration remains teammate-owned.
 
 Base URL: `http://localhost:8000/api/v1`
 
 ### 3.1 Intent Parsing
 - **Endpoint:** `POST /intent/parse`
-- **Description:** Probabilistically extracts structured intent from natural language.
+- **Description:** Target endpoint for structured intent extraction; the current parser uses cached responses and deterministic patterns.
 - **Request Body:**
   ```json
   {
@@ -180,7 +182,7 @@ Base URL: `http://localhost:8000/api/v1`
         "action_id": "act_001",
         "resource_type": "calendar",
         "resource_id": "evt_3pm_sync",
-        "operation": "update_time",
+        "operation": "calendar.update_event",
         "parameters": {"start_time": "2026-10-02T17:00:00Z"},
         "before_state": {"start_time": "2026-10-02T15:00:00Z"},
         "risk_level": "low",

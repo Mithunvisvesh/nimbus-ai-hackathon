@@ -1,4 +1,5 @@
 from typing import Any, Dict, List, Optional
+import secrets
 from src.schemas.plan import PlanStatus
 from src.schemas.journal import ActionJournalStatus
 from src.journal.db import ActionJournalDB
@@ -10,6 +11,7 @@ from src.integrity.hasher import compute_action_hash
 from src.schemas.plan import PlannedAction, PolicyOutcome, CandidatePlan
 from src.schemas.intent import StructuredIntent
 from src.policy.engine import PolicyEngine
+from src.mcp.fastmcp_server import create_fastmcp_server, call_fastmcp_tool_sync, UnknownMCPOutcomeError
 
 
 class ControlledExecutor:
@@ -28,9 +30,11 @@ class ControlledExecutor:
     def __init__(self, journal_db: ActionJournalDB, mcp_server: CareMCPServer):
         self.journal = journal_db
         self.mcp = mcp_server
+        self.mcp.bind_journal(journal_db)
+        self.mcp_protocol = create_fastmcp_server(mcp_server, journal_db)
         self.freshness_checker = FreshnessChecker(mcp_server=mcp_server)
         self.compensation_runner = SagaCompensationRunner(
-            journal_db=journal_db, mcp_server=mcp_server
+            journal_db=journal_db, mcp_server=mcp_server, mcp_protocol=self.mcp_protocol
         )
 
     def execute_plan(
@@ -137,6 +141,8 @@ class ControlledExecutor:
                     before_state=act.get("before_state", {}),
                     compensation_action=act.get("compensation_action"),
                 )
+                dispatch_token = secrets.token_urlsafe(32)
+                self.journal.prepare_tool_dispatch(rec_id, dispatch_token)
 
                 # Check if failure simulation requested for Beat 4
                 should_fail = (
@@ -146,12 +152,17 @@ class ControlledExecutor:
 
                 # 7. Execute State-Changing Tool
                 try:
-                    result = self.mcp.dispatch_tool(
-                        operation=act["operation"],
-                        parameters=act.get("parameters", {}),
-                        plan_id=plan_id,
-                        action_hash=stored_plan["action_hash"],
-                        simulate_failure=should_fail,
+                    result = call_fastmcp_tool_sync(
+                        self.mcp_protocol,
+                        act["operation"],
+                        {
+                            "plan_id": plan_id,
+                            "action_hash": stored_plan["action_hash"],
+                            "action_id": act["action_id"],
+                            "dispatch_token": dispatch_token,
+                            **act.get("parameters", {}),
+                            "simulate_failure": should_fail,
+                        },
                     )
                     # 8. Write-Ahead Journal: Post-Write Success
                     if act["resource_type"] == "calendar":
@@ -169,15 +180,15 @@ class ControlledExecutor:
                     observed_states[act["resource_id"]] = live_after
 
                 except Exception as exc:
-                    # Record failure in write-ahead log
-                    self.journal.log_post_action_failure(
-                        record_id=rec_id, error_msg=str(exc)
-                    )
+                    if isinstance(exc, UnknownMCPOutcomeError):
+                        self.journal.log_post_action_unknown(record_id=rec_id, error_msg=str(exc))
+                    else:
+                        self.journal.log_post_action_failure(record_id=rec_id, error_msg=str(exc))
                     self.journal.update_plan_status(plan_id, PlanStatus.FAILED)
 
                     # Trigger Saga Compensation for previously completed actions if requested
                     compensation_result = None
-                    if auto_compensate_on_failure and executed_records:
+                    if auto_compensate_on_failure and (executed_records or isinstance(exc, UnknownMCPOutcomeError)):
                         compensation_result = self.compensation_runner.compensate_plan(
                             plan_id=plan_id
                         )

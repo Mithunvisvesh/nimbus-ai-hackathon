@@ -2,6 +2,7 @@ from typing import Any, Dict, List, Optional
 from src.mcp.domains.calendar_module import CalendarDomainStore, CALENDAR_TOOL_METADATA
 from src.mcp.domains.tickets_module import TicketsDomainStore, TICKETS_TOOL_METADATA
 from src.schemas.tool_metadata import ToolMetadata
+from src.journal.db import ActionJournalDB
 
 class CareMCPServer:
     """
@@ -15,6 +16,10 @@ class CareMCPServer:
     ):
         self.calendar_store = calendar_store or CalendarDomainStore()
         self.tickets_store = tickets_store or TicketsDomainStore()
+        self._authorization_token = object()
+        self.calendar_store._bind_authorization_token(self._authorization_token)
+        self.tickets_store._bind_authorization_token(self._authorization_token)
+        self._journal: Optional[ActionJournalDB] = None
         self.metadata_registry: Dict[str, ToolMetadata] = {
             **CALENDAR_TOOL_METADATA,
             **TICKETS_TOOL_METADATA,
@@ -22,6 +27,10 @@ class CareMCPServer:
 
     def get_tool_metadata(self, operation: str) -> Optional[ToolMetadata]:
         return self.metadata_registry.get(operation)
+
+    def bind_journal(self, journal_db: ActionJournalDB) -> None:
+        """Bind the executor's durable plan journal as mutation authorization authority."""
+        self._journal = journal_db
 
     # ---------------- Read-Only Tools (Ungated) ----------------
     def list_calendar_events(self, start_time: Optional[str] = None, end_time: Optional[str] = None) -> List[Dict[str, Any]]:
@@ -47,6 +56,9 @@ class CareMCPServer:
         plan_id: str,
         action_hash: str,
         simulate_failure: bool = False,
+        action_id: Optional[str] = None,
+        dispatch_token: Optional[str] = None,
+        dispatch_kind: str = "execute",
     ) -> Dict[str, Any]:
         """
         Dispatches a state-changing tool call. Requires plan_id and action_hash.
@@ -54,9 +66,26 @@ class CareMCPServer:
         meta = self.get_tool_metadata(operation)
         if not meta:
             raise ValueError(f"Unknown MCP tool operation: {operation}")
+        if meta.read_only:
+            raise PermissionError(f"Operation '{operation}' is read-only and cannot use the mutation dispatch path.")
 
-        if not plan_id or not action_hash:
-            raise PermissionError(f"Operation {operation} requires verified plan_id and action_hash.")
+        if not self._journal:
+            raise PermissionError("No durable plan journal is bound; state-changing tools are disabled.")
+        if not action_id:
+            raise PermissionError("action_id is required for server-side mutation authorization.")
+        resource_id = parameters.get("event_id") or parameters.get("ticket_id")
+        if not resource_id:
+            raise PermissionError("A resource identifier is required for mutation authorization.")
+        self._journal.authorize_and_claim_tool_call(
+            plan_id=plan_id,
+            action_hash=action_hash,
+            action_id=action_id,
+            operation=operation,
+            resource_id=resource_id,
+            parameters=parameters,
+            dispatch_token=dispatch_token,
+            dispatch_kind=dispatch_kind,
+        )
 
         if operation == "calendar.update_event":
             return self.calendar_store.update_event(
@@ -67,6 +96,7 @@ class CareMCPServer:
                 plan_id=plan_id,
                 action_hash=action_hash,
                 simulate_failure=simulate_failure,
+                _authorization_token=self._authorization_token,
             )
         elif operation == "tickets.update_status":
             new_status = parameters.get("new_status") or parameters.get("status") or "closed"
@@ -78,6 +108,7 @@ class CareMCPServer:
                 plan_id=plan_id,
                 action_hash=action_hash,
                 simulate_failure=simulate_failure,
+                _authorization_token=self._authorization_token,
             )
         elif operation == "tickets.reopen_ticket":
             return self.tickets_store.reopen_ticket(
@@ -86,6 +117,7 @@ class CareMCPServer:
                 plan_id=plan_id,
                 action_hash=action_hash,
                 simulate_failure=simulate_failure,
+                _authorization_token=self._authorization_token,
             )
         else:
             raise NotImplementedError(f"Operation {operation} not supported in current phase.")

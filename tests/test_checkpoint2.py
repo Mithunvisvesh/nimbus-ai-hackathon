@@ -11,6 +11,7 @@ Verifies Phase 2 Gate Criteria (DoD):
 """
 
 import tempfile
+import secrets
 from pathlib import Path
 import pytest
 
@@ -27,6 +28,7 @@ from src.executor.runner import ControlledExecutor
 from src.integrity.freshness import FreshnessChecker
 from src.recovery.drift_detector import DriftDetector
 from src.recovery.compensation import SagaCompensationRunner
+from src.integrity.hasher import compute_action_hash
 
 
 @pytest.fixture
@@ -200,36 +202,48 @@ def test_drift_halts_compensation(test_env):
     mcp = test_env["mcp_server"]
     journal = test_env["journal_db"]
 
-    plan_id = "plan_drift_test_01"
     evt = mcp.get_calendar_event("evt_3pm_sync")
-
-    # Step 1: Pre-log and execute Action 1
-    rec_id = journal.log_pre_action(
-        plan_id=plan_id,
-        action_id="act_drift_01",
-        action_hash="hash123",
-        actor="user_mithun",
-        user_role="STANDARD_USER",
-        resource_type="calendar",
-        resource_id="evt_3pm_sync",
+    action = PlannedAction(
+        action_id="act_drift_01", resource_type="calendar", resource_id="evt_3pm_sync",
         operation="calendar.update_event",
-        before_state={"start_time": "2026-10-02T15:00:00Z"},
-        compensation_action={
-            "operation": "calendar.update_event",
-            "parameters": {"event_id": "evt_3pm_sync", "start_time": "2026-10-02T15:00:00Z"},
-        },
+        parameters={"event_id": "evt_3pm_sync", "start_time": "2026-10-02T16:00:00Z"},
+        before_state=evt,
+        compensation_action=CompensationAction(
+            operation="calendar.update_event",
+            parameters={"event_id": "evt_3pm_sync", "start_time": evt["start_time"]},
+        ),
     )
+    plan = CandidatePlan(
+        plan_id="plan_drift_test_01",
+        intent=StructuredIntent(goal="Move sync", scope="calendar"),
+        actor="user_mithun", user_role="STANDARD_USER", actions=[action],
+        action_hash=compute_action_hash([action]), policy_outcome=PolicyOutcome.AUTO_APPROVE,
+        status=PlanStatus.APPROVED,
+    )
+    journal.save_approved_plan(plan)
+    journal.transition_plan_to_executing(plan.plan_id)
+
+    rec_id = journal.log_pre_action(
+        plan_id=plan.plan_id, action_id=action.action_id, action_hash=plan.action_hash,
+        actor=plan.actor, user_role=plan.user_role, resource_type=action.resource_type,
+        resource_id=action.resource_id, operation=action.operation,
+        before_state=action.before_state, compensation_action=action.compensation_action.model_dump(),
+    )
+    dispatch_token = secrets.token_urlsafe(32)
+    journal.prepare_tool_dispatch(rec_id, dispatch_token)
 
     # Tool executes -> updates to 16:00
     mcp.dispatch_tool(
         operation="calendar.update_event",
         parameters={"event_id": "evt_3pm_sync", "start_time": "2026-10-02T16:00:00Z"},
-        plan_id=plan_id,
-        action_hash="hash123",
+        plan_id=plan.plan_id,
+        action_hash=plan.action_hash,
+        action_id=action.action_id,
+        dispatch_token=dispatch_token,
     )
     journal.log_post_action_success(
         record_id=rec_id,
-        after_state={"start_time": "2026-10-02T16:00:00Z"},
+        after_state=mcp.get_calendar_event(action.resource_id),
     )
 
     # EXTERNAL DRIFT: An external human reschedules to 16:30 directly behind agent's back
@@ -237,7 +251,7 @@ def test_drift_halts_compensation(test_env):
 
     # Now compensation runner attempts to compensate
     comp_runner = SagaCompensationRunner(journal_db=journal, mcp_server=mcp)
-    comp_result = comp_runner.compensate_plan(plan_id=plan_id)
+    comp_result = comp_runner.compensate_plan(plan_id=plan.plan_id)
 
     assert comp_result.status == "drift"
     assert "halted due to external drift" in comp_result.message
@@ -247,7 +261,7 @@ def test_drift_halts_compensation(test_env):
     assert live_evt["start_time"] == "2026-10-02T16:30:00Z"
 
     # Drift incident was logged
-    incidents = journal.get_drift_incidents(plan_id=plan_id)
+    incidents = journal.get_drift_incidents(plan_id=plan.plan_id)
     assert len(incidents) == 1
     assert incidents[0]["resource_id"] == "evt_3pm_sync"
     assert "16:00" in str(incidents[0]["expected_after_state"])

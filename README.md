@@ -151,8 +151,8 @@ To prevent unauthorized or ambiguous execution, the Policy Engine evaluates rule
 
 ## 5. System Architecture & Components
 
-### 1. Intent Parser (LLM)
-Transforms unstructured user prompts into a structured schema containing the core goal, affected scope, detected entities, structured constraints, and flagged ambiguities.
+### 1. Intent Parser Interface (Provider Integration Teammate-Owned)
+Transforms unstructured user prompts into the frozen structured intent schema. The current runtime uses cached responses and deterministic offline pattern extraction; a real LLM provider is not integrated and remains teammate-owned.
 
 ### 2. Planner & Dry-Run Resolver
 Utilizes read-only inspection tools to query current system state (e.g., reading calendar slots or ticket statuses). Generates concrete proposed actions populated with explicit targets, parameters, and current `before_state`. Unresolved or multiply matched targets produce no actions and return to policy for clarification. Calendar rescheduling preserves the event duration, uses its existing date unless an explicit supported date is provided, and retains its timezone.
@@ -197,23 +197,24 @@ Implements a saga compensation pattern for multi-action failures:
 
 ## 6. Model Context Protocol (MCP) Integration
 
-CARE adopts the **Model Context Protocol (MCP)** to expose modular, tool-agnostic capabilities to the agent while strictly enforcing execution boundaries.
+CARE runs one actual **FastMCP** server that exposes the existing calendar and ticket operations as namespaced MCP tools. `src/mcp/server.py` remains the CARE adapter for domain stores and trusted metadata; `src/mcp/fastmcp_server.py` exposes that adapter over MCP and is also used by the Controlled Executor through FastMCP's in-memory protocol client.
+
+Run the standalone MCP server with `python -m src.mcp.fastmcp_server` (stdio transport). Read-only discovery calls are available for planning. Mutation tools validate the persisted plan and action, the active execution or recovery state, exact parameters, a write-ahead journal record, and a one-time dispatch capability whose hash is stored in SQLite. Domain stores also require an internal server authorization token. A `plan_id` and `action_hash` alone cannot authorize a mutation.
 
 ```
                       ┌──────────────────────────────────────┐
                       │            CARE MCP SERVER           │
                       │                                      │
-                      │  calendar.*     tickets.*   files.*  │
-                      └───────▲─────────────▲──────────▲─────┘
-                              │             │          │
-                     ┌────────┴────────┐ ┌──┴───┐ ┌────┴─────┐
-                     │ calendar.py     │ │tickets.py│files.py│
-                     │ (Events, Invites│ │(Status,│ │ (Disk, │
-                     │  Schedules)     │ │ Priority││ Storage)│
-                     └─────────────────┘ └───────┘ └─────────┘
+                      │       calendar.*   tickets.*        │
+                      └────────────┬──────────────┬──────────┘
+                                   │              │
+                          ┌────────▼───────┐ ┌────▼────────┐
+                          │ Calendar domain│ │ Ticket domain│
+                          │ Events, schedule│ │ Status, notes│
+                          └────────────────┘ └─────────────┘
 ```
 
-- **Namespaced Tool Modules:** Cleanly modularized backend domain handlers (`calendar.*`, `tickets.*`, and optional `files.*`).
+- **Namespaced Tool Modules:** Cleanly modularized backend domain handlers (`calendar.*` and `tickets.*`); no files domain is implemented in this prototype.
 - **Separation of Privileges:**
   - The conversational agent is provided with **read-only inspection** tools and **plan proposal** capabilities.
   - State-changing tools require an authorized `plan_id` and verified `action_hash`, accessible exclusively by the CARE Executor.

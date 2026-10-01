@@ -71,7 +71,7 @@ Autonomous AI agents in enterprise environments face a critical reliability barr
 - **FR5.2:** Compare live state to planned `before_state`. If state drifted between planning and execution, abort and require re-planning.
 
 ### FR6: Controlled Execution via MCP
-- **FR6.1:** Connect to a single MCP server hosting domain namespaces (`calendar.*`, `tickets.*`, `files.*`).
+- **FR6.1:** Connect to a single MCP server hosting domain namespaces. The current prototype implements `calendar.*` and `tickets.*`; a `files.*` namespace remains future scope.
 - **FR6.2:** In the application architecture, the conversational agent is provided only with read-only discovery and proposal tool schemas; execution capability is strictly restricted to the Controlled Executor module.
 - **FR6.3:** State-changing tools demand a validated `plan_id` and verified `action_hash`, supplied exclusively by the Controlled Executor after passing policy, replay, and freshness gates.
 

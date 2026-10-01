@@ -11,6 +11,7 @@ Validates Phase 4 Rehearsal criteria:
 """
 
 import tempfile
+import secrets
 from pathlib import Path
 import pytest
 
@@ -195,6 +196,7 @@ def test_e2e_beat4_multi_action_drift_and_recovery(care_system):
         status=PlanStatus.APPROVED,
     )
     journal.save_approved_plan(plan)
+    journal.transition_plan_to_executing(plan_id)
 
     # Step 1 executes successfully
     rec1 = journal.log_pre_action(
@@ -209,8 +211,10 @@ def test_e2e_beat4_multi_action_drift_and_recovery(care_system):
         before_state=actions[0].before_state,
         compensation_action=actions[0].compensation_action.model_dump(),
     )
-    mcp.dispatch_tool(actions[0].operation, actions[0].parameters, plan_id, action_hash)
-    journal.log_post_action_success(rec1, {"start_time": "2026-10-02T16:00:00Z"})
+    dispatch_token = secrets.token_urlsafe(32)
+    journal.prepare_tool_dispatch(rec1, dispatch_token)
+    mcp.dispatch_tool(actions[0].operation, actions[0].parameters, plan_id, action_hash, action_id=actions[0].action_id, dispatch_token=dispatch_token)
+    journal.log_post_action_success(rec1, mcp.get_calendar_event(actions[0].resource_id))
 
     # Simulated external human drift
     mcp.calendar_store.events["evt_3pm_sync"]["start_time"] = "2026-10-02T16:45:00Z"

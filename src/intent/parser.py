@@ -15,9 +15,9 @@ CACHED_RESPONSES_PATH = Path(__file__).resolve().parent.parent.parent / "demo" /
 
 class IntentParser:
     """
-    Probabilistic Intent Parser for CARE.
-    Extracts StructuredIntent from natural language prompts.
-    Supports LLM invocation, cached fixture fallback, and deterministic pattern extraction.
+    Intent parser interface for CARE.
+    Extracts StructuredIntent from cached fixtures or deterministic patterns.
+    A real LLM provider is teammate-owned and is not integrated here yet.
     """
     def __init__(self, use_cache: bool = True):
         self.use_cache = use_cache
