@@ -8,7 +8,7 @@
 ## 1. Executive Summary & Core Thesis
 
 **Project in One Sentence:**  
-CARE builds an enterprise-grade control layer for autonomous AI agents that strictly decouples probabilistic natural-language interpretation from deterministic authorization and execution, ensuring agent actions are safely planned, policy-gated, integrity-checked, verified, and compensable.
+CARE builds an enterprise-oriented control layer for autonomous AI agents that strictly decouples probabilistic natural-language interpretation from deterministic authorization and execution, ensuring agent actions are safely planned, policy-gated, integrity-checked, verified, and compensable.
 
 ### The Core Problem
 Modern AI assistants frequently execute technical tool calls successfully while failing to satisfy the user's actual goal. Ambiguity, implicit constraints, and unstated assumptions create a critical gap between **technical execution success** and **intent-level correctness**:
@@ -74,7 +74,7 @@ CARE enforces a clear division of responsibility:
                 │
                 ▼
       ┌──────────────────┐
-      │Controlled Executor│ ◄── Executes authorized MCP tools (Only authorized executor holds credentials)
+      │Controlled Executor│ ◄── Executes authorized MCP tools (State-changing execution capability is restricted to the Controlled Executor)
       └─────────┬────────┘
                 │
                 ▼
@@ -120,8 +120,8 @@ CARE enforces a clear division of responsibility:
 | :--- | :--- |
 | Natural-language intent interpretation | Role-Based Access Control (RBAC) & Permissions |
 | Goal, entity, and constraint extraction | Deterministic Policy Gate (Auto-Approve, Clarify, Confirm, Block) |
-| Candidate dry-run plan generation | Tool declared metadata (reversibility, destructive, external impact) |
-| LLM-assisted semantic verification *(optional extension)* | Cryptographic Plan Integrity (`plan_id` + canonical `action_hash`) |
+| Candidate dry-run plan generation | Trusted tool metadata (reversibility, destructive, external impact) |
+| LLM-assisted semantic verification *(optional extension)* | Plan Integrity & Replay Protection (`plan_id` + canonical `action_hash`) |
 | | Pre-execution resource freshness validation |
 | | Write-Ahead Action Journal (SQLite persistence) |
 | | System state invariant checking |
@@ -145,7 +145,7 @@ To prevent unauthorized or ambiguous execution, the Policy Engine evaluates rule
 1. **Permission Check:** Does `user_role` have authority for all operations in the plan? *(If no → `BLOCK`)*
 2. **Ambiguity & Feasibility:** Does the plan contain unresolved external participants or physical conflicts (e.g., overlapping meetings)? *(If yes → `CLARIFY`)*
 3. **Consequential Action Rules:** Does any action carry high risk, destructive effects, external side effects, or escalation tags? *(If yes → `CONFIRM`)*
-4. **Auto-Approval Rule:** Are all operations internal, authorized, reversible, within affected count limits ($N \le \text{threshold}$), and low risk? *(If yes → `AUTO-APPROVE`)*
+4. **Auto-Approval Rule:** Are all operations internal, authorized, reversible, within `affected_count <= threshold`, and low risk? *(If yes → `AUTO-APPROVE`)*
 
 ---
 
@@ -158,24 +158,27 @@ Transforms unstructured user prompts into a structured schema containing the cor
 Utilizes read-only inspection tools to query current system state (e.g., reading calendar slots or ticket statuses). Generates concrete proposed actions populated with explicit targets, parameters, and current `before_state`.
 
 ### 3. Policy & Risk Engine
-Deterministic rule evaluator operating on concrete action parameters and tool-declared metadata (`reversible`, `destructive`, `external_effect`, `affects_external_party`).
+Deterministic rule evaluator operating on concrete action parameters and trusted tool metadata (`reversible`, `destructive`, `external_effect`, `affects_external_party`, `compensation_supported`). LLM-proposed values are advisory only.
 
-### 4. Plan Integrity Layer
-Binds an approved plan to a unique `plan_id` and an immutable `action_hash`.  
-- **Canonicalization:** `action_hash` is computed using SHA-256 over canonical JSON (sorted keys, stripping dynamic runtime fields such as status).
-- **Anti-Tampering:** The executor validates that the action list received matches the approved hash byte-for-byte.
+### 4. Plan Integrity & Replay Protection Layer
+Binds an approved plan to a unique server-side `plan_id` and an immutable `action_hash`.  
+- **Action-List Mismatch Detection:** `action_hash` is computed using SHA-256 over canonical JSON (sorted keys, stripping dynamic runtime fields such as status). The executor validates that the action list to execute matches the approved plan byte-for-byte.
+- **Single-Use Replay Protection:** A `plan_id` is strictly single-use. Upon execution commencement, the plan transitions to `EXECUTING` through an atomic database state change; concurrent or subsequent execution attempts are rejected. Authorization remains anchored to the stored approved plan record, not the hash in isolation.
+- **Confirmation Binding:** For `CONFIRM`, the user authorizes the exact persisted `plan_id + action_hash`. The plan cannot be regenerated or modified after confirmation; any change requires a new plan and authorization.
 
 ### 5. Write-Ahead Action Journal
-Maintains an append-only, durable log (SQLite) tracking the lifecycle of every operation:
+Maintains a durable action journal in SQLite with application-level audit preservation (leveraging SQLite WAL mode for database durability/concurrency) tracking the lifecycle of every operation:
 1. **Pre-Write:** Logs `planned` action, parameters, and baseline `before_state`.
 2. **Execution:** Transitions status to `executing`.
 3. **Post-Write:** Logs resulting `after_state`, tool output `result`, or runtime `error`.
 4. **Recovery Log:** Tracks compensation execution, completed compensations, and drift alerts.
+5. **Unknown Outcome:** Records `UNKNOWN` when a tool may have been dispatched but its response was lost; reconciliation is required before retry or compensation.
 
 ### 6. Controlled Executor
-The only component possessing write/execute privileges against system tools. Enforces two mandatory barriers before invoking any write tool:
+The only component possessing write/execute authority against system tools in the application architecture. Enforces mandatory barriers before invoking any write tool:
+- **Authorization & Single-Use Check:** Plan exists, is `APPROVED`, and has not been previously consumed.
 - **Integrity Validation:** `hash(actions) == approved_action_hash`.
-- **State Freshness Check:** Re-reads resource state immediately before execution; if `live_state != before_state`, aborts execution and requests re-planning.
+- **State Freshness Check:** Re-reads each target resource immediately before its corresponding state-changing action; if `live_state != before_state`, aborts that action and requests re-planning.
 
 ### 7. Post-Execution Verifier
 Executes invariant checks against actual post-operation resource states:
@@ -185,7 +188,7 @@ Executes invariant checks against actual post-operation resource states:
 ### 8. Recovery & Compensation Engine
 Implements a saga compensation pattern for multi-action failures:
 - If action $k$ fails in a multi-step sequence, compensations are triggered in reverse order for actions $1 \dots k-1$.
-- **Drift Protection:** Prior to running any compensation action, the engine inspects the resource. If `current_state != journaled after_state` (meaning an external user or system modified the resource after the agent touched it), the system **halts rollback** and flags the incident for **human review**.
+- **Drift Protection:** Prior to running any compensation action, the engine inspects the resource. If `current_state != journaled after_state` (meaning an external user or system modified the resource after the agent touched it), the system **halts rollback** and flags the incident for **human review**. Compensation actions are predefined/approved as part of the original plan; the recovery engine cannot invent new compensation operations at runtime.
 
 ---
 
@@ -230,6 +233,7 @@ To enable seamless parallel development across teammates, these three core inter
   "constraints": [
     {
       "type": "preserve_items",
+      "source": "explicit",
       "params": {
         "property": "external_attendee"
       }
@@ -283,19 +287,19 @@ To enable seamless parallel development across teammates, these three core inter
       ]
     }
   ],
-  "action_hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "action_hash": "c01df17ae2d6a4bfd5359ae854c45b22fc1ef29ee5c30b3c898fe09bf3280604",
   "policy_outcome": "auto_approve",
   "status": "approved"
 }
 ```
-> *Valid Plan Statuses:* `planned`, `awaiting_confirmation`, `approved`, `blocked`, `executing`, `done`, `failed`, `recovering`, `compensated`, `drift`.
+> *Valid Plan Statuses:* `planned`, `awaiting_confirmation`, `approved`, `blocked`, `terminated`, `executing`, `done`, `failed`, `recovering`, `compensated`, `drift`.
 
 ### Contract 3: Action Journal Record (SQLite)
 ```json
 {
   "plan_id": "plan_982f1b8a-3e12",
   "action_id": "act_001",
-  "action_hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "action_hash": "c01df17ae2d6a4bfd5359ae854c45b22fc1ef29ee5c30b3c898fe09bf3280604",
   "actor": "user_mithun",
   "user_role": "STANDARD_USER",
   "resource_type": "calendar",
@@ -363,7 +367,7 @@ Judges evaluate both technical capability and architectural honesty. The CARE te
 ### What CARE Delivers:
 - Deterministic gating preventing blind execution of ambiguous LLM proposals.
 - Structural verification that real system state satisfies constraints post-execution.
-- Cryptographic plan-to-execution verification preventing runtime tampering.
+- Canonical action hashing detects action-list mismatch between the approved plan and the execution request.
 - Resilient recovery preventing accidental corruption when systems drift.
 
 ### What CARE Explicitly Does NOT Claim:
@@ -382,14 +386,14 @@ Judges evaluate both technical capability and architectural honesty. The CARE te
 > **Q2: Why evaluate policy on the planned dry-run actions rather than the user's prompt?**  
 > **A:** The risk of an action cannot be understood from words alone. A seemingly benign request like *"clean up outdated items"* might resolve in the dry run to deleting 5,000 production records. Policy must evaluate the concrete target resources and side effects.
 
-> **Q3: How do you prevent plan tampering or replay attacks?**  
-> **A:** When a plan is approved, it is sealed with a unique `plan_id` and a SHA-256 `action_hash` of its canonical action list. The executor verifies this hash before executing and rejects any altered payload.
+> **Q3: How do you detect action-list tampering and prevent plan replay?**  
+> **A:** CARE computes a canonical SHA-256 `action_hash` and compares it with the hash stored on the approved server-side plan, detecting action-list mismatch. The executor also atomically consumes the single-use `plan_id`, preventing replay. The hash alone is not an authorization credential.
 
 > **Q4: What if an external system state changes between planning and execution?**  
-> **A:** CARE performs a pre-execution **state freshness check**. If the live state of any target resource no longer matches the plan's `before_state`, the plan is marked stale, execution is aborted, and the user is guided to re-plan.
+> **A:** CARE performs a final **per-action state freshness check** immediately before each state-changing call. If the live state no longer matches that action's `before_state`, the action is aborted and the user is guided to re-plan. The plan is not blindly retried against changed state.
 
 > **Q5: How does CARE handle partial failures across sequential actions?**  
-> **A:** CARE’s Write-Ahead Journal records the state before and after each action. If action 3 of 5 fails, the recovery engine inspects the journal and executes predefined compensation actions in reverse order for completed actions.
+> **A:** CARE’s durable action journal records the state before and after each action. If action 3 of 5 fails, the recovery engine inspects the journal and executes predefined, already-approved compensation actions in reverse order for completed actions. If a tool response is ambiguous, the action first enters `UNKNOWN` and is reconciled before any retry or compensation.
 
 > **Q6: What happens if a resource is modified externally during a failure?**  
 > **A:** CARE conducts a **drift check** before applying compensation. If `current_state != journaled after_state`, the system detects third-party modification, aborts automatic compensation, and flags the conflict for human intervention.
@@ -397,6 +401,16 @@ Judges evaluate both technical capability and architectural honesty. The CARE te
 ---
 
 ## 11. Team Work Plan & Overnight Milestones
+
+### Role & Permission Matrix
+
+| Role | Read/Inspect | Internal Reversible Write | Consequential Write |
+| :--- | :---: | :---: | :---: |
+| `READ_ONLY` | Yes | No | No |
+| `STANDARD_USER` | Yes | Subject to policy | Confirmation when consequential |
+| `ADMIN` | Yes | Subject to policy | Confirmation/policy still applies |
+
+`actor` and `user_role` come from authenticated or simulated request context, not from LLM inference.
 
 ### Role Assignments
 
@@ -422,7 +436,7 @@ Judges evaluate both technical capability and architectural honesty. The CARE te
 
 ```
 nimbus-ai-hackathon/
-├── README.md                               # Project documentation & source of truth
+├── README.md                               # Project entry point & documentation index
 ├── NIMBUS_2026_CARE_Hybrid_Updated.docx    # Reference design specification
 ├── src/                                    # Implementation source (under development)
 │   ├── orchestrator/                       # Intent parsing, planning, and policy gate
@@ -433,5 +447,7 @@ nimbus-ai-hackathon/
 │   └── verifier/                           # Post-execution invariant checks
 └── tests/                                  # Demo beat test suite & scenario runners
 ```
+
+Documentation authority is domain-specific: README is the project entry point; PRD defines requirements; DATA defines schemas/data contracts; API defines interfaces; DECISIONS records architectural decisions; PHASES defines the roadmap; LOGS records implementation history.
 
 *Built with precision for the Nimbus AI Hackathon 2026.*
