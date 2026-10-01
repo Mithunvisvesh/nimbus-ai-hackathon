@@ -147,5 +147,60 @@ class DryRunPlanner:
         return [action]
 
     def _resolve_tickets_actions(self, intent: StructuredIntent) -> List[PlannedAction]:
-        # Placeholder for ticket domain (will be fully wired in Phase 3)
-        return []
+        tickets = self.mcp.list_tickets() if hasattr(self.mcp, "list_tickets") else []
+        if not tickets:
+            return []
+
+        target_ticket = None
+        for ent in intent.entities:
+            ent_str = str(ent).lower().replace("-", "_")
+            for t in tickets:
+                if t["id"].lower() == ent_str or ent_str in t["id"].lower():
+                    target_ticket = t
+                    break
+            if target_ticket:
+                break
+
+        if not target_ticket:
+            for t in tickets:
+                if any(isinstance(word, str) and word.lower() in t.get("title", "").lower() for word in intent.entities):
+                    target_ticket = t
+                    break
+
+        if not target_ticket:
+            target_ticket = tickets[0]
+
+        before_state = dict(target_ticket)
+        is_escalated = target_ticket.get("is_escalated", False) or "escalation" in target_ticket.get("tags", [])
+        risk_level = RiskLevel.HIGH if is_escalated else RiskLevel.LOW
+
+        new_status = "closed"
+        if "reopen" in intent.goal.lower():
+            new_status = "open"
+        elif "in_progress" in intent.goal.lower():
+            new_status = "in_progress"
+
+        action = PlannedAction(
+            action_id=f"act_{uuid.uuid4().hex[:6]}",
+            resource_type="tickets",
+            resource_id=target_ticket["id"],
+            operation="tickets.update_status",
+            parameters={
+                "ticket_id": target_ticket["id"],
+                "new_status": new_status,
+                "resolution_notes": f"Automated update via CARE: {intent.goal}",
+            },
+            before_state=before_state,
+            risk_level=risk_level,
+            reversible=True,
+            compensation_action=CompensationAction(
+                operation="tickets.update_status",
+                parameters={
+                    "ticket_id": target_ticket["id"],
+                    "new_status": before_state.get("status", "open"),
+                    "resolution_notes": "Saga compensation: rollback to prior status",
+                },
+            ),
+            constraints=intent.constraints,
+        )
+        return [action]

@@ -115,11 +115,12 @@ class ControlledExecutor:
                         simulate_failure=should_fail,
                     )
                     # 8. Write-Ahead Journal: Post-Write Success
-                    live_after = (
-                        self.mcp.get_calendar_event(act["resource_id"])
-                        if act["resource_type"] == "calendar"
-                        else result
-                    ) or result
+                    if act["resource_type"] == "calendar":
+                        live_after = self.mcp.get_calendar_event(act["resource_id"]) or result
+                    elif act["resource_type"] == "tickets" and hasattr(self.mcp, "get_ticket"):
+                        live_after = self.mcp.get_ticket(act["resource_id"]) or result
+                    else:
+                        live_after = result
                     self.journal.log_post_action_success(
                         record_id=rec_id,
                         after_state=live_after,

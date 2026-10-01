@@ -93,10 +93,15 @@ class IntentParser:
                 intent_confidence=IntentConfidence.MEDIUM,
             )
 
-        # Ticket Domain Pattern
+        # Ticket Domain Pattern (e.g. "Close escalated ticket #402", "Close ticket #105")
         if "ticket" in lower_prompt or "tkt" in lower_prompt:
-            tkt_match = re.search(r"(tkt[_-]?\d+)", lower_prompt)
-            ticket_id = tkt_match.group(1).replace("-", "_") if tkt_match else "tkt_402"
+            tkt_match = re.search(r"(?:tkt[_-]?|ticket\s*#?\s*)(\d+)", lower_prompt)
+            if tkt_match:
+                ticket_id = f"tkt_{tkt_match.group(1)}"
+            else:
+                tkt_match2 = re.search(r"(tkt[_-]?\w+)", lower_prompt)
+                ticket_id = tkt_match2.group(1).replace("-", "_") if tkt_match2 else "tkt_402"
+
             action = "close" if "close" in lower_prompt or "resolve" in lower_prompt else "update"
             return StructuredIntent(
                 goal=f"{action.capitalize()} ticket {ticket_id}",
@@ -104,10 +109,15 @@ class IntentParser:
                 entities=[ticket_id],
                 constraints=[
                     IntentConstraint(
+                        type=ConstraintType.EXPECTED_STATE_EQUALS_ACTUAL_STATE,
+                        params={"property": "status"},
+                        source="policy",
+                    ),
+                    IntentConstraint(
                         type=ConstraintType.NO_DESTRUCTIVE_ACTIONS,
                         params={},
                         source="policy",
-                    )
+                    ),
                 ],
                 ambiguities=[],
                 intent_confidence=IntentConfidence.HIGH,

@@ -258,15 +258,22 @@ class InvariantChecker:
         """Verify that actual resource state matches expected state after execution."""
         expected_dict = params.get("expected")
         if not expected_dict:
-            # Check if a single property was specified (e.g. property="start_time")
+            # Check if a single property was specified (e.g. property="start_time" or property="status")
             prop = params.get("property")
-            if prop and prop in action.parameters:
-                expected_dict = {prop: action.parameters[prop]}
-            else:
-                expected_dict = {
-                    k: v for k, v in action.parameters.items()
-                    if k not in ("plan_id", "action_hash", "event_id", "ticket_id")
-                }
+            if prop:
+                if prop in action.parameters:
+                    expected_dict = {prop: action.parameters[prop]}
+                elif prop == "status" and "new_status" in action.parameters:
+                    expected_dict = {"status": action.parameters["new_status"]}
+            if not expected_dict:
+                expected_dict = {}
+                for k, v in action.parameters.items():
+                    if k in ("plan_id", "action_hash", "event_id", "ticket_id", "resolution_notes"):
+                        continue
+                    if k == "new_status":
+                        expected_dict["status"] = v
+                    else:
+                        expected_dict[k] = v
 
         mismatches = []
         for key, expected_val in expected_dict.items():
