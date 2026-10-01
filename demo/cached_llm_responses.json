@@ -1,0 +1,116 @@
+{
+  "Move my 3 PM meeting to 5 PM": {
+    "goal": "Move meeting from 3 pm to 5 pm",
+    "scope": "calendar",
+    "entities": ["3 pm", "5 pm", "meeting"],
+    "constraints": [
+      {
+        "type": "preserve_items",
+        "params": {"items": ["attendees", "location"]},
+        "source": "inferred"
+      },
+      {
+        "type": "expected_state_equals_actual_state",
+        "params": {"property": "start_time"},
+        "source": "policy"
+      }
+    ],
+    "ambiguities": [],
+    "intent_confidence": "high"
+  },
+  "Move my 3 PM meeting to 4 PM": {
+    "goal": "Move meeting from 3 pm to 4 pm",
+    "scope": "calendar",
+    "entities": ["3 pm", "4 pm", "meeting"],
+    "constraints": [
+      {
+        "type": "preserve_items",
+        "params": {"items": ["attendees", "location"]},
+        "source": "inferred"
+      },
+      {
+        "type": "expected_state_equals_actual_state",
+        "params": {"property": "start_time"},
+        "source": "policy"
+      }
+    ],
+    "ambiguities": [],
+    "intent_confidence": "high"
+  },
+  "Move 3 PM meeting to 4 PM": {
+    "goal": "Move meeting from 3 pm to 4 pm",
+    "scope": "calendar",
+    "entities": ["3 pm", "4 pm", "meeting"],
+    "constraints": [
+      {
+        "type": "preserve_items",
+        "params": {"items": ["attendees", "location"]},
+        "source": "inferred"
+      },
+      {
+        "type": "expected_state_equals_actual_state",
+        "params": {"property": "start_time"},
+        "source": "policy"
+      }
+    ],
+    "ambiguities": [],
+    "intent_confidence": "high"
+  },
+  "Clear my afternoon": {
+    "goal": "Clear afternoon calendar",
+    "scope": "calendar",
+    "entities": ["afternoon"],
+    "constraints": [
+      {
+        "type": "preserve_items",
+        "params": {"property": "external_attendee"},
+        "source": "inferred"
+      },
+      {
+        "type": "no_destructive_actions",
+        "params": {},
+        "source": "policy"
+      }
+    ],
+    "ambiguities": ["unspecified_treatment_of_external_attendees"],
+    "intent_confidence": "medium"
+  },
+  "Close escalated ticket #402": {
+    "goal": "Close ticket tkt_402",
+    "scope": "tickets",
+    "entities": ["tkt_402"],
+    "constraints": [
+      {
+        "type": "expected_state_equals_actual_state",
+        "params": {"property": "status"},
+        "source": "policy"
+      },
+      {
+        "type": "no_destructive_actions",
+        "params": {},
+        "source": "policy"
+      }
+    ],
+    "ambiguities": [],
+    "intent_confidence": "high"
+  },
+  "Close ticket #105": {
+    "goal": "Close ticket tkt_105",
+    "scope": "tickets",
+    "entities": ["tkt_105"],
+    "constraints": [
+      {
+        "type": "expected_state_equals_actual_state",
+        "params": {"property": "status"},
+        "source": "policy"
+      },
+      {
+        "type": "no_destructive_actions",
+        "params": {},
+        "source": "policy"
+      }
+    ],
+    "ambiguities": [],
+    "intent_confidence": "high"
+  }
+}
