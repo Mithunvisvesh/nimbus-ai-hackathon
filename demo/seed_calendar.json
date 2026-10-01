@@ -1,0 +1,57 @@
+[
+  {
+    "id": "evt_client_review",
+    "title": "Quarterly Client Review",
+    "start_time": "2026-10-02T14:00:00Z",
+    "end_time": "2026-10-02T14:30:00Z",
+    "attendees": [
+      {
+        "name": "Alice",
+        "email": "alice@company.com",
+        "is_external": false
+      },
+      {
+        "name": "Client VP",
+        "email": "vp@acme-corp.com",
+        "is_external": true
+      }
+    ],
+    "location": "Virtual / Meet",
+    "status": "confirmed"
+  },
+  {
+    "id": "evt_3pm_sync",
+    "title": "Weekly Team Sync",
+    "start_time": "2026-10-02T15:00:00Z",
+    "end_time": "2026-10-02T15:30:00Z",
+    "attendees": [
+      {
+        "name": "Alice",
+        "email": "alice@company.com",
+        "is_external": false
+      },
+      {
+        "name": "Bob",
+        "email": "bob@company.com",
+        "is_external": false
+      }
+    ],
+    "location": "Virtual / Meet",
+    "status": "confirmed"
+  },
+  {
+    "id": "evt_5pm_hold",
+    "title": "Strategy Review",
+    "start_time": "2026-10-02T17:00:00Z",
+    "end_time": "2026-10-02T17:30:00Z",
+    "attendees": [
+      {
+        "name": "Director Carol",
+        "email": "carol@company.com",
+        "is_external": false
+      }
+    ],
+    "location": "Virtual / Room 4B",
+    "status": "confirmed"
+  }
+]

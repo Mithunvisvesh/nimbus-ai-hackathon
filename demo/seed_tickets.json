@@ -1,0 +1,22 @@
+[
+  {
+    "id": "tkt_402",
+    "title": "Payment gateway timeout for enterprise tenant",
+    "priority": "P1",
+    "status": "in_progress",
+    "tags": ["escalation", "enterprise", "billing"],
+    "assigned_to": "engineer_bob",
+    "description": "API requests to stripe gateway failing with 504.",
+    "is_escalated": true
+  },
+  {
+    "id": "tkt_105",
+    "title": "Update documentation links in footer",
+    "priority": "P3",
+    "status": "open",
+    "tags": ["docs", "ui"],
+    "assigned_to": "engineer_alice",
+    "description": "Broken hyperlink on footer documentation tab.",
+    "is_escalated": false
+  }
+]
