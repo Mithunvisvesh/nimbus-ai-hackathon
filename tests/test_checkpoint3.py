@@ -110,7 +110,7 @@ def test_beat3_escalated_ticket_requires_confirm_and_executes(test_env):
     # Simulated User Confirmation Flow
     plan.policy_outcome = eval_result.outcome
     plan.status = PlanStatus.APPROVED
-    journal.save_approved_plan(plan)
+    journal.save_approved_plan(plan, explicit_confirmation=True)
 
     # Execute approved plan
     exec_res = executor.execute_plan(plan.plan_id, plan.action_hash)
@@ -210,10 +210,10 @@ def test_beat4_multi_domain_failure_and_drift_halts_rollback(test_env):
         user_role="STANDARD_USER",
         actions=actions,
         action_hash=action_hash,
-        policy_outcome=PolicyOutcome.AUTO_APPROVE,
+        policy_outcome=PolicyOutcome.CONFIRM,
         status=PlanStatus.APPROVED,
     )
-    journal.save_approved_plan(plan)
+    journal.save_approved_plan(plan, explicit_confirmation=True)
 
     # 1. Step 1 executes successfully through ControlledExecutor
     # 2. Before Step 2, an external human edits the calendar event to 16:45 directly
@@ -359,10 +359,10 @@ def test_tickets_saga_compensation_success(test_env):
         user_role="ADMIN",
         actions=actions,
         action_hash=action_hash,
-        policy_outcome=PolicyOutcome.AUTO_APPROVE,
+        policy_outcome=PolicyOutcome.CONFIRM,
         status=PlanStatus.APPROVED,
     )
-    journal.save_approved_plan(plan)
+    journal.save_approved_plan(plan, explicit_confirmation=True)
 
     # Execute with simulated failure on Step 2
     with pytest.raises(RuntimeError) as exc_info:

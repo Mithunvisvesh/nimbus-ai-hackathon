@@ -155,7 +155,7 @@ To prevent unauthorized or ambiguous execution, the Policy Engine evaluates rule
 Transforms unstructured user prompts into a structured schema containing the core goal, affected scope, detected entities, structured constraints, and flagged ambiguities.
 
 ### 2. Planner & Dry-Run Resolver
-Utilizes read-only inspection tools to query current system state (e.g., reading calendar slots or ticket statuses). Generates concrete proposed actions populated with explicit targets, parameters, and current `before_state`.
+Utilizes read-only inspection tools to query current system state (e.g., reading calendar slots or ticket statuses). Generates concrete proposed actions populated with explicit targets, parameters, and current `before_state`. Unresolved or multiply matched targets produce no actions and return to policy for clarification. Calendar rescheduling preserves the event duration, uses its existing date unless an explicit supported date is provided, and retains its timezone.
 
 ### 3. Policy & Risk Engine
 Deterministic rule evaluator operating on concrete action parameters and trusted tool metadata (`reversible`, `destructive`, `external_effect`, `affects_external_party`, `compensation_supported`). LLM-proposed values are advisory only.
@@ -177,8 +177,10 @@ Maintains a durable action journal in SQLite with application-level audit preser
 ### 6. Controlled Executor
 The only component possessing write/execute authority against system tools in the application architecture. Enforces mandatory barriers before invoking any write tool:
 - **Authorization & Single-Use Check:** Plan exists, is `APPROVED`, and has not been previously consumed.
+- **Policy Outcome Check:** Stored policy outcome must be `AUTO_APPROVE` or `CONFIRM`; confirmation-required plans are persisted only after the explicit confirmation flow.
 - **Integrity Validation:** `hash(actions) == approved_action_hash`.
 - **State Freshness Check:** Re-reads each target resource immediately before its corresponding state-changing action; if `live_state != before_state`, aborts that action and requests re-planning.
+- **Execution-Boundary Verification:** Checks action invariants immediately after each tool return and plan-level invariants before marking the plan `DONE`; failed verification enters the compensation flow.
 
 ### 7. Post-Execution Verifier
 Executes invariant checks against actual post-operation resource states:
@@ -189,6 +191,7 @@ Executes invariant checks against actual post-operation resource states:
 Implements a saga compensation pattern for multi-action failures:
 - If action $k$ fails in a multi-step sequence, compensations are triggered in reverse order for actions $1 \dots k-1$.
 - **Drift Protection:** Prior to running any compensation action, the engine inspects the resource. If `current_state != journaled after_state` (meaning an external user or system modified the resource after the agent touched it), the system **halts rollback** and flags the incident for **human review**. Compensation actions are predefined/approved as part of the original plan; the recovery engine cannot invent new compensation operations at runtime.
+- **Interrupted Action Reconciliation:** Before compensation, any write-ahead record left `EXECUTING` or `UNKNOWN` is compared with its recorded `before_state` and the action's predicted `after_state`. A match is journaled as unapplied or completed; any third state is recorded as drift and halts recovery for human review.
 
 ---
 

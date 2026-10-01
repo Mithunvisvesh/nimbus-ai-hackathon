@@ -6,6 +6,10 @@ from src.mcp.server import CareMCPServer
 from src.integrity.freshness import FreshnessChecker
 from src.verifier.invariant_checker import InvariantChecker
 from src.recovery.compensation import SagaCompensationRunner, SagaCompensationResult
+from src.integrity.hasher import compute_action_hash
+from src.schemas.plan import PlannedAction, PolicyOutcome, CandidatePlan
+from src.schemas.intent import StructuredIntent
+from src.policy.engine import PolicyEngine
 
 
 class ControlledExecutor:
@@ -56,6 +60,35 @@ class ControlledExecutor:
                 f"Plan '{plan_id}' is not in approved state (current: {stored_plan['status']}). Execution rejected."
             )
 
+        if stored_plan.get("policy_outcome") not in (PolicyOutcome.AUTO_APPROVE.value, PolicyOutcome.CONFIRM.value):
+            raise PermissionError("Plan has no executable policy outcome; clarify and blocked plans cannot execute.")
+
+        actions = stored_plan["actions"]
+        if not actions or compute_action_hash(actions) != stored_plan["action_hash"]:
+            raise ValueError("Stored plan actions are empty or do not match their canonical action hash.")
+        for act in actions:
+            metadata = self.mcp.get_tool_metadata(act.get("operation", ""))
+            if metadata is None or metadata.read_only:
+                raise PermissionError(f"Operation '{act.get('operation')}' is not a registered state-changing tool.")
+        if not stored_plan.get("intent"):
+            raise PermissionError("Approved plan is missing its persisted intent and cannot be policy-validated.")
+        policy_plan = CandidatePlan(
+            plan_id=plan_id,
+            intent=StructuredIntent.model_validate(stored_plan["intent"]),
+            actor=stored_plan["actor"],
+            user_role=stored_plan["user_role"],
+            actions=[PlannedAction.model_validate(action) for action in actions],
+            action_hash=stored_plan["action_hash"],
+            policy_outcome=PolicyOutcome(stored_plan["policy_outcome"]),
+            status=PlanStatus.APPROVED,
+        )
+        current_decision = PolicyEngine(self.mcp).evaluate(policy_plan)
+        if current_decision.outcome in (PolicyOutcome.BLOCK, PolicyOutcome.CLARIFY) or (
+            current_decision.outcome == PolicyOutcome.CONFIRM
+            and stored_plan["policy_outcome"] != PolicyOutcome.CONFIRM.value
+        ):
+            raise PermissionError(f"Current policy does not authorize execution: {current_decision.reason}")
+
         # 3. Verify submitted hash matches stored hash
         if submitted_action_hash != stored_plan["action_hash"]:
             raise ValueError(
@@ -69,12 +102,14 @@ class ControlledExecutor:
                 f"PLAN_ALREADY_CONSUMED: Failed atomic CAS transition. Plan '{plan_id}' was consumed concurrently."
             )
 
-        actions = stored_plan["actions"]
         executed_records = []
         observed_states: Dict[str, Dict[str, Any]] = {}
 
         try:
             for idx, act in enumerate(actions):
+                metadata = self.mcp.get_tool_metadata(act["operation"])
+                if metadata is None or metadata.read_only:
+                    raise PermissionError(f"Operation '{act['operation']}' is not a registered state-changing tool.")
                 # 5. Pre-execution Freshness Check (ADR-005)
                 freshness = self.freshness_checker.check_freshness(
                     resource_type=act.get("resource_type", "calendar"),
@@ -83,7 +118,11 @@ class ControlledExecutor:
                 )
                 if not freshness.is_fresh:
                     self.journal.update_plan_status(plan_id, PlanStatus.FAILED)
-                    raise RuntimeError(freshness.error_message)
+                    compensation_result = None
+                    if auto_compensate_on_failure and executed_records:
+                        compensation_result = self.compensation_runner.compensate_plan(plan_id=plan_id)
+                    suffix = f" | Saga compensation status: {compensation_result.status}" if compensation_result else ""
+                    raise RuntimeError(f"{freshness.error_message}{suffix}")
 
                 # 6. Write-Ahead Journal: Pre-Write before tool dispatch (ADR-006)
                 rec_id = self.journal.log_pre_action(
@@ -148,8 +187,42 @@ class ControlledExecutor:
                         error_msg += f" | Saga compensation status: {compensation_result.status}"
                     raise RuntimeError(error_msg) from exc
 
-            # 9. All actions dispatched successfully -> Post-execution invariant check
-            # Plan marked DONE
+                verification = InvariantChecker.verify_action(
+                    PlannedAction.model_validate(act), live_after, metadata
+                )
+                if not verification.passed:
+                    self.journal.update_plan_status(plan_id, PlanStatus.FAILED)
+                    compensation_result = None
+                    if auto_compensate_on_failure:
+                        compensation_result = self.compensation_runner.compensate_plan(plan_id=plan_id)
+                    raise RuntimeError(
+                        f"Post-execution invariant verification failed: {verification.summary}"
+                        + (f" | Saga compensation status: {compensation_result.status}" if compensation_result else "")
+                    )
+
+            # 9. All actions dispatched and verified successfully.
+            if stored_plan.get("intent"):
+                verification = InvariantChecker.verify_plan(
+                    CandidatePlan(
+                        plan_id=plan_id,
+                        intent=StructuredIntent.model_validate(stored_plan["intent"]),
+                        actor=stored_plan["actor"],
+                        user_role=stored_plan["user_role"],
+                        actions=[PlannedAction.model_validate(action) for action in actions],
+                        action_hash=stored_plan["action_hash"],
+                        policy_outcome=PolicyOutcome(stored_plan["policy_outcome"]),
+                        status=PlanStatus.EXECUTING,
+                    ),
+                    observed_states,
+                    {operation: self.mcp.get_tool_metadata(operation) for operation in {a["operation"] for a in actions}},
+                )
+                if not verification.passed:
+                    self.journal.update_plan_status(plan_id, PlanStatus.FAILED)
+                    compensation_result = self.compensation_runner.compensate_plan(plan_id) if auto_compensate_on_failure else None
+                    raise RuntimeError(
+                        f"Plan invariant verification failed: {verification.summary}"
+                        + (f" | Saga compensation status: {compensation_result.status}" if compensation_result else "")
+                    )
             self.journal.update_plan_status(plan_id, PlanStatus.DONE)
             return {
                 "plan_id": plan_id,

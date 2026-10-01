@@ -132,7 +132,7 @@ def test_e2e_beat3_rbac_and_escalated_ticket(care_system):
 
     plan_std.policy_outcome = dec_std.outcome
     plan_std.status = PlanStatus.APPROVED
-    journal.save_approved_plan(plan_std)
+    journal.save_approved_plan(plan_std, explicit_confirmation=True)
 
     exec_res = executor.execute_plan(plan_std.plan_id, plan_std.action_hash)
     assert exec_res["status"] == PlanStatus.DONE.value

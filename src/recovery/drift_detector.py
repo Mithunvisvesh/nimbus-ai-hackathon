@@ -80,21 +80,16 @@ class DriftDetector:
             )
 
         # Check key fields for differences
-        keys_to_compare = critical_keys or (
-            ["start_time", "end_time", "title"]
-            if resource_type == "calendar"
-            else ["status", "is_escalated", "assigned_to", "priority"]
-        )
+        keys_to_compare = critical_keys or list(set(expected_after_state) | set(live_state))
 
         differences = []
         for key in keys_to_compare:
-            if key in expected_after_state:
-                exp_val = expected_after_state[key]
-                live_val = live_state.get(key)
-                if exp_val != live_val:
-                    differences.append(
-                        f"Field '{key}': expected {exp_val!r} (journaled), found {live_val!r} (live)"
-                    )
+            exp_val = expected_after_state.get(key)
+            live_val = live_state.get(key)
+            if exp_val != live_val:
+                differences.append(
+                    f"Field '{key}': expected {exp_val!r} (journaled), found {live_val!r} (live)"
+                )
 
         has_drift = len(differences) > 0
         incident_id = None

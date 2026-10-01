@@ -64,11 +64,7 @@ class FreshnessChecker:
                 error_message=f"Resource '{resource_id}' no longer exists in live store.",
             )
 
-        keys_to_check = critical_keys or (
-            ["start_time", "end_time", "title"]
-            if resource_type == "calendar"
-            else ["status", "is_escalated", "assigned_to"]
-        )
+        keys_to_check = critical_keys or list(set(expected_before_state) | set(live_state))
 
         mismatches: List[FreshnessMismatch] = []
         for key in keys_to_check:

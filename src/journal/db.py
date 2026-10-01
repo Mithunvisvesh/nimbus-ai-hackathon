@@ -3,7 +3,7 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
-from src.schemas.plan import CandidatePlan, PlanStatus
+from src.schemas.plan import CandidatePlan, PlanStatus, PolicyOutcome
 from src.schemas.journal import JournalRecord, ActionJournalStatus
 
 from contextlib import contextmanager
@@ -37,6 +37,7 @@ class ActionJournalDB:
                 policy_outcome TEXT NOT NULL,
                 action_hash TEXT NOT NULL,
                 actions_json TEXT NOT NULL,
+                intent_json TEXT,
                 status TEXT NOT NULL,
                 created_at TEXT NOT NULL,
                 approved_at TEXT,
@@ -81,17 +82,29 @@ class ActionJournalDB:
             CREATE INDEX IF NOT EXISTS idx_journal_resource ON journal_records(resource_type, resource_id);
             CREATE INDEX IF NOT EXISTS idx_journal_status ON journal_records(status);
             """)
+            plan_columns = {row["name"] for row in conn.execute("PRAGMA table_info(approved_plans)")}
+            if "intent_json" not in plan_columns:
+                conn.execute("ALTER TABLE approved_plans ADD COLUMN intent_json TEXT")
 
-    def save_approved_plan(self, plan: CandidatePlan) -> None:
+    def save_approved_plan(self, plan: CandidatePlan, explicit_confirmation: bool = False) -> None:
         """Stores an approved candidate plan for cryptographic binding and replay control."""
+        if plan.policy_outcome not in (PolicyOutcome.AUTO_APPROVE, PolicyOutcome.CONFIRM):
+            raise ValueError("Only auto-approved or explicitly confirmed plans can be persisted as approved.")
+        if plan.policy_outcome == PolicyOutcome.CONFIRM and not explicit_confirmation:
+            raise ValueError("A confirm-required plan needs an explicit human confirmation before approval.")
+        if not plan.actions or not plan.action_hash:
+            raise ValueError("An approved plan must contain actions and a canonical action hash.")
+        from src.integrity.hasher import compute_action_hash
+        if compute_action_hash(plan.actions) != plan.action_hash:
+            raise ValueError("Plan action_hash does not match its actions.")
         now = datetime.now(timezone.utc).isoformat()
         actions_data = [act.model_dump() for act in plan.actions]
         with self._get_connection() as conn:
             conn.execute(
                 """
-                INSERT OR REPLACE INTO approved_plans 
-                (plan_id, actor, user_role, policy_outcome, action_hash, actions_json, status, created_at, approved_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO approved_plans
+                (plan_id, actor, user_role, policy_outcome, action_hash, actions_json, intent_json, status, created_at, approved_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     plan.plan_id,
@@ -100,6 +113,7 @@ class ActionJournalDB:
                     plan.policy_outcome.value if plan.policy_outcome else "approved",
                     plan.action_hash or "",
                     json.dumps(actions_data, sort_keys=True),
+                    json.dumps(plan.intent.model_dump(), sort_keys=True),
                     PlanStatus.APPROVED.value,
                     now,
                     now,
@@ -143,6 +157,7 @@ class ActionJournalDB:
                 return None
             res = dict(row)
             res["actions"] = json.loads(res["actions_json"])
+            res["intent"] = json.loads(res["intent_json"]) if res.get("intent_json") else None
             return res
 
     def log_pre_action(

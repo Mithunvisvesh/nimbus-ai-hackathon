@@ -83,6 +83,7 @@ class TicketsDomainStore:
         ticket_id: str,
         new_status: str,
         resolution_notes: Optional[str] = None,
+        clear_resolution_notes: bool = False,
         plan_id: Optional[str] = None,
         action_hash: Optional[str] = None,
         simulate_failure: bool = False,
@@ -99,7 +100,9 @@ class TicketsDomainStore:
 
         t = self.tickets[ticket_id]
         t["status"] = new_status
-        if resolution_notes:
+        if clear_resolution_notes:
+            t.pop("resolution_notes", None)
+        elif resolution_notes is not None:
             t["resolution_notes"] = resolution_notes
 
         return dict(t)
@@ -117,6 +120,7 @@ class TicketsDomainStore:
             ticket_id=ticket_id,
             new_status="open",
             resolution_notes=reason,
+            clear_resolution_notes=False,
             plan_id=plan_id,
             action_hash=action_hash,
             simulate_failure=simulate_failure,

@@ -1,6 +1,7 @@
 import re
 import os
 import json
+from datetime import datetime
 from pathlib import Path
 from typing import Optional, Dict, Any
 from src.schemas.intent import (
@@ -46,6 +47,22 @@ class IntentParser:
         if reschedule_match:
             source_time = reschedule_match.group(1).strip()
             target_time = reschedule_match.group(2).strip()
+            date_match = re.search(
+                r"\b(20\d{2}-\d{2}-\d{2}|\d{1,2}/\d{1,2}/20\d{2}|(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s+\d{1,2},?\s+20\d{2})\b",
+                lower_prompt,
+            )
+            entities = [source_time, target_time, "meeting"]
+            if date_match:
+                date_text = date_match.group(1)
+                parsed_date = None
+                for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%B %d %Y", "%b %d %Y"):
+                    try:
+                        parsed_date = datetime.strptime(date_text.replace(",", ""), fmt).date()
+                        break
+                    except ValueError:
+                        continue
+                if parsed_date:
+                    entities.append(parsed_date.isoformat())
 
             ambiguities = []
             if "client" in lower_prompt and "external" not in lower_prompt:
@@ -54,7 +71,7 @@ class IntentParser:
             return StructuredIntent(
                 goal=f"Move meeting from {source_time} to {target_time}",
                 scope="calendar",
-                entities=[source_time, target_time, "meeting"],
+                entities=entities,
                 constraints=[
                     IntentConstraint(
                         type=ConstraintType.PRESERVE_ITEMS,

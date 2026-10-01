@@ -136,7 +136,7 @@ def run_beat_3():
     print(">> Action: User provides explicit confirmation -> Approved.")
     plan_std.policy_outcome = dec_std.outcome
     plan_std.status = PlanStatus.APPROVED
-    journal.save_approved_plan(plan_std)
+    journal.save_approved_plan(plan_std, explicit_confirmation=True)
     executor.execute_plan(plan_std.plan_id, plan_std.action_hash)
     print(f">> Live Ticket Status: '{mcp.get_ticket('tkt_402')['status']}'")
 

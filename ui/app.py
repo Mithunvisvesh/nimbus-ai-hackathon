@@ -404,7 +404,7 @@ if plan and decision:
             if st.button("✅ Authorize & Execute Plan", type="primary", use_container_width=True):
                 plan.policy_outcome = decision.outcome
                 plan.status = PlanStatus.APPROVED
-                st.session_state.journal_db.save_approved_plan(plan)
+                st.session_state.journal_db.save_approved_plan(plan, explicit_confirmation=True)
                 try:
                     res = st.session_state.executor.execute_plan(
                         plan_id=plan.plan_id,

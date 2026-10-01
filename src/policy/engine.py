@@ -1,5 +1,5 @@
-from typing import Tuple, List, Optional
-from src.schemas.plan import CandidatePlan, PolicyOutcome, PlanStatus, RiskLevel
+from typing import List, Optional
+from src.schemas.plan import CandidatePlan, PolicyOutcome
 from src.mcp.server import CareMCPServer
 
 class PolicyEvaluationResult:
@@ -20,7 +20,7 @@ class PolicyEngine:
     Precedence: Permissions -> Ambiguity/Feasibility -> Consequential Action -> Auto-Approval.
     """
     def __init__(self, mcp_server: Optional[CareMCPServer] = None):
-        self.mcp = mcp_server
+        self.mcp = mcp_server or CareMCPServer()
 
     def evaluate(self, plan: CandidatePlan) -> PolicyEvaluationResult:
         # If no actions were generated
@@ -30,15 +30,13 @@ class PolicyEngine:
                 reason="No concrete actions could be resolved from request.",
             )
 
-        # 1. Permission Verification (RBAC)
-        if plan.user_role == "READ_ONLY":
-            for act in plan.actions:
-                # Any mutation attempted by READ_ONLY is blocked
-                if not act.operation.endswith(".list") and not act.operation.endswith(".get") and not act.operation.endswith(".check"):
-                    return PolicyEvaluationResult(
-                        outcome=PolicyOutcome.BLOCK,
-                        reason=f"Role 'READ_ONLY' is unauthorized to execute mutating operation '{act.operation}'.",
-                    )
+        # 1. Permission and trusted tool metadata verification (RBAC)
+        for act in plan.actions:
+            meta = self.mcp.get_tool_metadata(act.operation) if self.mcp else None
+            if meta is None:
+                return PolicyEvaluationResult(PolicyOutcome.BLOCK, f"Operation '{act.operation}' is not registered.")
+            if not meta.read_only and plan.user_role == "READ_ONLY":
+                return PolicyEvaluationResult(PolicyOutcome.BLOCK, f"Role 'READ_ONLY' is unauthorized to execute mutating operation '{act.operation}'.")
 
         # 2. Ambiguity & Feasibility Verification
         if plan.intent.ambiguities:
@@ -62,7 +60,7 @@ class PolicyEngine:
                             return PolicyEvaluationResult(
                                 outcome=PolicyOutcome.CLARIFY,
                                 reason=f"Target slot is occupied by '{conflict.get('title', 'another event')}'.",
-                                suggested_alternatives=["2026-10-02T16:00:00Z", "2026-10-02T18:00:00Z"],
+                            suggested_alternatives=self._suggest_alternatives(target_start, target_end, act.resource_id),
                             )
 
         # 3. Consequential / External Actions
@@ -83,16 +81,11 @@ class PolicyEngine:
                     reason=f"Action affects external attendees on resource '{act.resource_id}'. Explicit user confirmation required.",
                 )
 
-            if act.risk_level in (RiskLevel.HIGH, RiskLevel.CRITICAL):
+            meta = self.mcp.get_tool_metadata(act.operation) if self.mcp else None
+            if meta and (meta.external_effect or meta.affects_external_party or meta.destructive or not meta.reversible or not meta.compensation_supported):
                 return PolicyEvaluationResult(
                     outcome=PolicyOutcome.CONFIRM,
-                    reason=f"High risk level ({act.risk_level.value}) declared for action '{act.action_id}'. Confirmation required.",
-                )
-
-            if not act.reversible:
-                return PolicyEvaluationResult(
-                    outcome=PolicyOutcome.CONFIRM,
-                    reason=f"Irreversible action '{act.action_id}' requires explicit confirmation.",
+                    reason=f"Operation '{act.operation}' has consequential effects or lacks safe compensation.",
                 )
 
         # 4. Low-Risk Auto-Approval
@@ -100,3 +93,27 @@ class PolicyEngine:
             outcome=PolicyOutcome.AUTO_APPROVE,
             reason="All actions are authorized, internal, reversible, and conflict-free.",
         )
+
+    def _suggest_alternatives(self, start: str, end: str, exclude_event_id: str) -> List[str]:
+        from datetime import datetime, timedelta
+        try:
+            start_dt = datetime.fromisoformat(start.replace("Z", "+00:00"))
+            end_dt = datetime.fromisoformat(end.replace("Z", "+00:00"))
+        except (TypeError, ValueError):
+            return []
+        duration = end_dt - start_dt
+        candidates = []
+        for hour in sorted(range(8, 19), key=lambda value: (abs(value - start_dt.hour), value)):
+            slot = start_dt.replace(hour=hour, minute=0, second=0, microsecond=0)
+            slot_end = slot + duration
+            if slot == start_dt:
+                continue
+            if self.mcp.check_calendar_availability(
+                slot.isoformat().replace("+00:00", "Z"),
+                slot_end.isoformat().replace("+00:00", "Z"),
+                exclude_event_id=exclude_event_id,
+            ).get("available", False):
+                candidates.append(slot.isoformat().replace("+00:00", "Z"))
+                if len(candidates) == 2:
+                    break
+        return candidates

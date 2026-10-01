@@ -1,4 +1,6 @@
 import uuid
+import re
+from datetime import datetime
 from typing import Optional, List, Dict, Any
 from src.schemas.intent import StructuredIntent
 from src.schemas.plan import (
@@ -58,7 +60,7 @@ class DryRunPlanner:
                 if any(t in e.get("start_time", "") for t in ["12:", "13:", "14:", "15:", "16:", "17:"])
             ]
             if not afternoon_events:
-                afternoon_events = events
+                return []
 
             actions = []
             for ev in afternoon_events:
@@ -94,28 +96,41 @@ class DryRunPlanner:
             return actions
 
         # Case 2: Target event reschedule (e.g. 3 PM sync)
-        target_event = None
-        for ev in events:
-            start = ev.get("start_time", "")
-            if "15:00" in start or "3pm" in ev.get("id", "") or "sync" in ev.get("title", "").lower():
-                target_event = ev
-                break
-
-        if not target_event and events:
-            target_event = events[0]
-
-        if not target_event:
+        source_time = self._parse_clock(intent.entities[0]) if len(intent.entities) >= 2 else None
+        candidates = [ev for ev in events if source_time and self._event_clock(ev) == source_time]
+        if not candidates:
+            name_entities = [
+                ent for ent in intent.entities
+                if ent.lower() not in {"meeting", "sync"}
+                and self._parse_clock(ent) is None
+                and self._parse_date(ent) is None
+            ]
+            candidates = [ev for ev in events if any(
+                ent.lower() in ev.get("title", "").lower()
+                for ent in name_entities
+            )]
+        if len(candidates) != 1:
             return []
+        target_event = candidates[0]
 
         # Determine target times
-        target_start = "2026-10-02T16:00:00Z"
-        target_end = "2026-10-02T16:30:00Z"
-
-        # Check if intent asked for 5 PM
-        for ent in intent.entities:
-            if "5" in str(ent).lower():
-                target_start = "2026-10-02T17:00:00Z"
-                target_end = "2026-10-02T17:30:00Z"
+        target_clock = self._parse_clock(intent.entities[1]) if len(intent.entities) >= 2 else None
+        if target_clock is None:
+            return []
+        start = datetime.fromisoformat(target_event["start_time"].replace("Z", "+00:00"))
+        end = datetime.fromisoformat(target_event["end_time"].replace("Z", "+00:00"))
+        target_start_dt = start.replace(hour=target_clock[0], minute=target_clock[1], second=0, microsecond=0)
+        if len(intent.entities) >= 4:
+            explicit_date = self._parse_date(intent.entities[3])
+            if explicit_date is None:
+                return []
+            target_start_dt = target_start_dt.replace(
+                year=explicit_date.year, month=explicit_date.month, day=explicit_date.day
+            )
+        duration = end - start
+        target_end_dt = target_start_dt + duration
+        target_start = target_start_dt.isoformat().replace("+00:00", "Z")
+        target_end = target_end_dt.isoformat().replace("+00:00", "Z")
 
         before_state = dict(target_event)
         has_external = any(att.get("is_external", False) for att in target_event.get("attendees", []))
@@ -162,13 +177,15 @@ class DryRunPlanner:
                 break
 
         if not target_ticket:
-            for t in tickets:
-                if any(isinstance(word, str) and word.lower() in t.get("title", "").lower() for word in intent.entities):
-                    target_ticket = t
-                    break
+            matches = [t for t in tickets if any(
+                len(word) >= 3 and word.lower() in t.get("title", "").lower()
+                for word in intent.entities
+            )]
+            if len(matches) == 1:
+                target_ticket = matches[0]
 
         if not target_ticket:
-            target_ticket = tickets[0]
+            return []
 
         before_state = dict(target_ticket)
         is_escalated = target_ticket.get("is_escalated", False) or "escalation" in target_ticket.get("tags", [])
@@ -198,9 +215,38 @@ class DryRunPlanner:
                 parameters={
                     "ticket_id": target_ticket["id"],
                     "new_status": before_state.get("status", "open"),
-                    "resolution_notes": "Saga compensation: rollback to prior status",
+                    "resolution_notes": before_state.get("resolution_notes"),
+                    "clear_resolution_notes": before_state.get("resolution_notes") is None,
                 },
             ),
             constraints=intent.constraints,
         )
         return [action]
+
+    @staticmethod
+    def _parse_clock(value: str) -> Optional[tuple[int, int]]:
+        match = re.fullmatch(r"\s*(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\s*", value.lower())
+        if not match:
+            return None
+        hour, minute = int(match.group(1)), int(match.group(2) or 0)
+        meridiem = match.group(3)
+        if minute > 59 or hour > (12 if meridiem else 23) or hour < (1 if meridiem else 0):
+            return None
+        if meridiem:
+            hour = hour % 12 + (12 if meridiem == "pm" else 0)
+        return hour, minute
+
+    @classmethod
+    def _event_clock(cls, event: Dict[str, Any]) -> Optional[tuple[int, int]]:
+        try:
+            value = datetime.fromisoformat(event["start_time"].replace("Z", "+00:00"))
+            return value.hour, value.minute
+        except (KeyError, ValueError):
+            return None
+
+    @staticmethod
+    def _parse_date(value: str):
+        try:
+            return datetime.strptime(value, "%Y-%m-%d").date()
+        except ValueError:
+            return None

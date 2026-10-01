@@ -67,6 +67,17 @@ class SagaCompensationRunner:
                 message="No journal records found for plan.",
             )
 
+        # Reconcile actions interrupted after their write-ahead record but before
+        # the post-action journal update. Never compensate around an unknown result.
+        inflight = [r for r in records if r.status in (ActionJournalStatus.EXECUTING, ActionJournalStatus.UNKNOWN)]
+        if inflight and self._reconcile_inflight(plan_id, inflight):
+            return SagaCompensationResult(
+                plan_id=plan_id,
+                status="drift",
+                message="An interrupted action could not be reconciled safely; compensation halted for human review.",
+            )
+        records = self.journal.get_journal_records(plan_id)
+
         # 2. Identify records eligible for compensation (status == 'done') in reverse order
         done_records = [r for r in records if r.status == ActionJournalStatus.DONE]
         done_records.reverse()
@@ -162,3 +173,64 @@ class SagaCompensationRunner:
             compensated_steps=compensated_steps,
             message=f"Successfully compensated {len(compensated_steps)} actions in reverse order.",
         )
+
+    def _reconcile_inflight(self, plan_id: str, records: List[JournalRecord]) -> bool:
+        """Resolve write-ahead-only records by comparing live state to before/expected-after."""
+        plan = self.journal.get_plan(plan_id)
+        actions = {a["action_id"]: a for a in (plan or {}).get("actions", [])}
+        for record in records:
+            action = actions.get(record.action_id)
+            live = self._get_live_state(record.resource_type, record.resource_id)
+            expected = self._predict_after_state(record.before_state, action or {})
+            with self.journal._get_connection() as conn:
+                row = conn.execute(
+                    "SELECT record_id FROM journal_records WHERE plan_id = ? AND action_id = ?",
+                    (plan_id, record.action_id),
+                ).fetchone()
+            if not row:
+                raise RuntimeError(f"Missing journal row for in-flight action {record.action_id}.")
+            if live == record.before_state:
+                self.journal.update_action_status(row["record_id"], ActionJournalStatus.FAILED)
+            elif expected is not None and live == expected:
+                self.journal.log_post_action_success(row["record_id"], after_state=live, result=live)
+            else:
+                self.journal.log_drift_incident(
+                    plan_id=plan_id,
+                    action_id=record.action_id,
+                    resource_id=record.resource_id,
+                    expected_after_state=expected or {},
+                    observed_drift_state=live or {"status": "missing"},
+                    notes="Interrupted action state matches neither its before_state nor predicted after_state.",
+                )
+                self.journal.update_action_status(row["record_id"], ActionJournalStatus.DRIFT)
+                self.journal.update_plan_status(plan_id, PlanStatus.DRIFT)
+                return True
+        return False
+
+    def _get_live_state(self, resource_type: str, resource_id: str) -> Optional[Dict[str, Any]]:
+        if resource_type == "calendar":
+            return self.mcp.get_calendar_event(resource_id)
+        if resource_type == "tickets":
+            return self.mcp.get_ticket(resource_id)
+        return None
+
+    @staticmethod
+    def _predict_after_state(before: Dict[str, Any], action: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        if not action:
+            return None
+        expected = dict(before)
+        params = action.get("parameters", {})
+        operation = action.get("operation")
+        if operation == "calendar.update_event":
+            for key in ("start_time", "end_time", "title"):
+                if params.get(key) is not None:
+                    expected[key] = params[key]
+            return expected
+        if operation == "tickets.update_status":
+            expected["status"] = params.get("new_status", params.get("status", "closed"))
+            if params.get("clear_resolution_notes"):
+                expected.pop("resolution_notes", None)
+            elif params.get("resolution_notes") is not None:
+                expected["resolution_notes"] = params["resolution_notes"]
+            return expected
+        return None

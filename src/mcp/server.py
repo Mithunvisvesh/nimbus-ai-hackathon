@@ -74,6 +74,7 @@ class CareMCPServer:
                 ticket_id=parameters["ticket_id"],
                 new_status=new_status,
                 resolution_notes=parameters.get("resolution_notes"),
+                clear_resolution_notes=parameters.get("clear_resolution_notes", False),
                 plan_id=plan_id,
                 action_hash=action_hash,
                 simulate_failure=simulate_failure,

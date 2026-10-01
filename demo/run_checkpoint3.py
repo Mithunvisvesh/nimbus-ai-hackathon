@@ -76,7 +76,7 @@ def run_beat3_demo():
     print("\n>>> USER INTERACTION: User confirms closure of escalated ticket #402.")
     plan_b.policy_outcome = eval_b.outcome
     plan_b.status = PlanStatus.APPROVED
-    journal_db.save_approved_plan(plan_b)
+    journal_db.save_approved_plan(plan_b, explicit_confirmation=True)
 
     exec_res_b = executor.execute_plan(plan_b.plan_id, plan_b.action_hash)
     print(f">> CONTROLLED EXECUTOR: Status={exec_res_b['status']}")

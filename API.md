@@ -44,6 +44,9 @@ State-changing tools in CARE are strictly protected: they can **only** be invoke
 4. The requesting actor and user role match the authorized plan record.
 5. Live target resources match planned `before_state` (freshness check).
 6. The submitted `action_hash` matches the approved plan's canonical action hash.
+7. The stored policy outcome is executable (`AUTO_APPROVE` or `CONFIRM`); confirmation-required plans must pass the explicit confirmation step before storage.
+8. Post-action and plan-level invariants pass before the plan is marked `DONE`.
+9. During recovery, any `EXECUTING` or `UNKNOWN` journal entries are reconciled against their before and predicted after states before compensation proceeds; unresolved drift halts rollback for human review.
 
 Only when all six conditions pass does the executor invoke the state-changing MCP tool. The conversational agent is only provided with **read-only** discovery tool definitions in its context.
 
