@@ -251,3 +251,62 @@ class ActionJournalDB:
                     )
                 )
             return records
+
+    def update_action_status(self, record_id: int, new_status: ActionJournalStatus) -> None:
+        """Updates the status of a specific journal action record."""
+        with self._get_connection() as conn:
+            conn.execute(
+                "UPDATE journal_records SET status = ? WHERE record_id = ?",
+                (new_status.value, record_id),
+            )
+
+    def log_drift_incident(
+        self,
+        plan_id: str,
+        action_id: str,
+        resource_id: str,
+        expected_after_state: Dict[str, Any],
+        observed_drift_state: Dict[str, Any],
+        notes: Optional[str] = None,
+    ) -> int:
+        """Persists a detected drift incident in the drift_incidents table."""
+        now = datetime.now(timezone.utc).isoformat()
+        with self._get_connection() as conn:
+            cur = conn.execute(
+                """
+                INSERT INTO drift_incidents
+                (plan_id, action_id, resource_id, expected_after_state, observed_drift_state, detected_at, remediation_status, notes)
+                VALUES (?, ?, ?, ?, ?, ?, 'pending_human_review', ?)
+                """,
+                (
+                    plan_id,
+                    action_id,
+                    resource_id,
+                    json.dumps(expected_after_state, sort_keys=True),
+                    json.dumps(observed_drift_state, sort_keys=True),
+                    now,
+                    notes,
+                ),
+            )
+            return cur.lastrowid
+
+    def get_drift_incidents(self, plan_id: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Retrieves drift incident records."""
+        with self._get_connection() as conn:
+            if plan_id:
+                rows = conn.execute(
+                    "SELECT * FROM drift_incidents WHERE plan_id = ? ORDER BY incident_id DESC",
+                    (plan_id,),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM drift_incidents ORDER BY incident_id DESC"
+                ).fetchall()
+
+            res = []
+            for r in rows:
+                item = dict(r)
+                item["expected_after_state"] = json.loads(item["expected_after_state"])
+                item["observed_drift_state"] = json.loads(item["observed_drift_state"])
+                res.append(item)
+            return res

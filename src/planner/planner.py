@@ -47,13 +47,55 @@ class DryRunPlanner:
         )
 
     def _resolve_calendar_actions(self, intent: StructuredIntent) -> List[PlannedAction]:
-        # Query read-only calendar events
         events = self.mcp.list_calendar_events()
+        if not events:
+            return []
 
-        # Target event matching (e.g. 3 PM sync)
+        # Case 1: Multi-event "Clear afternoon calendar" (Beat 2)
+        if "afternoon" in intent.entities or "clear" in intent.goal.lower():
+            afternoon_events = [
+                e for e in events
+                if any(t in e.get("start_time", "") for t in ["12:", "13:", "14:", "15:", "16:", "17:"])
+            ]
+            if not afternoon_events:
+                afternoon_events = events
+
+            actions = []
+            for ev in afternoon_events:
+                has_external = any(att.get("is_external", False) for att in ev.get("attendees", []))
+                risk = RiskLevel.HIGH if has_external else RiskLevel.LOW
+                before = dict(ev)
+
+                actions.append(
+                    PlannedAction(
+                        action_id=f"act_{uuid.uuid4().hex[:6]}",
+                        resource_type="calendar",
+                        resource_id=ev["id"],
+                        operation="calendar.update_event",
+                        parameters={
+                            "event_id": ev["id"],
+                            "title": f"[CANCELLED] {ev.get('title', '')}",
+                        },
+                        before_state=before,
+                        risk_level=risk,
+                        reversible=True,
+                        compensation_action=CompensationAction(
+                            operation="calendar.update_event",
+                            parameters={
+                                "event_id": ev["id"],
+                                "title": before.get("title", ""),
+                                "start_time": before.get("start_time"),
+                                "end_time": before.get("end_time"),
+                            },
+                        ),
+                        constraints=intent.constraints,
+                    )
+                )
+            return actions
+
+        # Case 2: Target event reschedule (e.g. 3 PM sync)
         target_event = None
         for ev in events:
-            # Check 3 PM / 15:00
             start = ev.get("start_time", "")
             if "15:00" in start or "3pm" in ev.get("id", "") or "sync" in ev.get("title", "").lower():
                 target_event = ev
@@ -66,7 +108,6 @@ class DryRunPlanner:
             return []
 
         # Determine target times
-        # For Phase 1 vertical slice: 3 PM (15:00) to 4 PM (16:00) or specified in entities
         target_start = "2026-10-02T16:00:00Z"
         target_end = "2026-10-02T16:30:00Z"
 
@@ -77,8 +118,6 @@ class DryRunPlanner:
                 target_end = "2026-10-02T17:30:00Z"
 
         before_state = dict(target_event)
-
-        # Check if external attendees exist
         has_external = any(att.get("is_external", False) for att in target_event.get("attendees", []))
         risk_level = RiskLevel.HIGH if has_external else RiskLevel.LOW
 

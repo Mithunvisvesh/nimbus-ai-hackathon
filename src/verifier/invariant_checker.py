@@ -256,14 +256,17 @@ class InvariantChecker:
         result: VerificationResult,
     ) -> None:
         """Verify that actual resource state matches expected state after execution."""
-        # Expected state can come explicitly from params['expected'] or from action.parameters
         expected_dict = params.get("expected")
         if not expected_dict:
-            # Fallback to keys present in action.parameters
-            expected_dict = {
-                k: v for k, v in action.parameters.items()
-                if k not in ("plan_id", "action_hash")
-            }
+            # Check if a single property was specified (e.g. property="start_time")
+            prop = params.get("property")
+            if prop and prop in action.parameters:
+                expected_dict = {prop: action.parameters[prop]}
+            else:
+                expected_dict = {
+                    k: v for k, v in action.parameters.items()
+                    if k not in ("plan_id", "action_hash", "event_id", "ticket_id")
+                }
 
         mismatches = []
         for key, expected_val in expected_dict.items():
@@ -327,24 +330,31 @@ class InvariantChecker:
                         )
                     )
 
-        # Generic field preservation
-        preserved_fields = params.get("preserve_fields", [])
+        # Generic field/items preservation (supports preserve_fields, items, or property)
+        preserved_fields = params.get("preserve_fields") or params.get("items") or []
+        if isinstance(preserved_fields, str):
+            preserved_fields = [preserved_fields]
+
+        if prop and prop != "external_attendee" and prop not in preserved_fields:
+            preserved_fields.append(prop)
+
         for field in preserved_fields:
-            before_val = action.before_state.get(field)
-            after_val = actual_after_state.get(field)
-            if before_val != after_val:
-                result.add_violation(
-                    InvariantViolation(
-                        constraint_type=ConstraintType.PRESERVE_ITEMS,
-                        action_id=action.action_id,
-                        resource_id=action.resource_id,
-                        message=(
-                            f"Preserved field '{field}' changed from {before_val!r} to {after_val!r}."
-                        ),
-                        expected=before_val,
-                        actual=after_val,
+            if field in action.before_state and field in actual_after_state:
+                before_val = action.before_state.get(field)
+                after_val = actual_after_state.get(field)
+                if before_val != after_val:
+                    result.add_violation(
+                        InvariantViolation(
+                            constraint_type=ConstraintType.PRESERVE_ITEMS,
+                            action_id=action.action_id,
+                            resource_id=action.resource_id,
+                            message=(
+                                f"Preserved field '{field}' changed from {before_val!r} to {after_val!r}."
+                            ),
+                            expected=before_val,
+                            actual=after_val,
+                        )
                     )
-                )
 
     @classmethod
     def _verify_max_affected_action(

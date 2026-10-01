@@ -38,9 +38,9 @@ class IntentParser:
         # 2. Rule/Pattern fallback (ensures 100% offline hackathon robustness)
         lower_prompt = normalized_prompt.lower()
 
-        # Calendar Reschedule Pattern (e.g. "Move 3 PM meeting to 4 PM")
+        # Calendar Reschedule Pattern (e.g. "Move 3 PM meeting to 4 PM" or "Move my 3 PM meeting to 5 PM")
         reschedule_match = re.search(
-            r"move\s+(?:the\s+)?(\d{1,2}(?::\d{2})?\s*(?:am|pm)?)\s*(?:meeting|sync)?\s+to\s+(\d{1,2}(?::\d{2})?\s*(?:am|pm)?)",
+            r"move\s+(?:my\s+)?(?:the\s+)?(\d{1,2}(?::\d{2})?\s*(?:am|pm)?)\s*(?:meeting|sync)?\s+to\s+(\d{1,2}(?::\d{2})?\s*(?:am|pm)?)",
             lower_prompt,
         )
         if reschedule_match:
@@ -69,6 +69,28 @@ class IntentParser:
                 ],
                 ambiguities=ambiguities,
                 intent_confidence=IntentConfidence.HIGH if not ambiguities else IntentConfidence.MEDIUM,
+            )
+
+        # Calendar "Clear Afternoon" Pattern (Beat 2)
+        if "clear" in lower_prompt and ("afternoon" in lower_prompt or "calendar" in lower_prompt):
+            return StructuredIntent(
+                goal="Clear afternoon calendar",
+                scope="calendar",
+                entities=["afternoon"],
+                constraints=[
+                    IntentConstraint(
+                        type=ConstraintType.PRESERVE_ITEMS,
+                        params={"property": "external_attendee"},
+                        source="inferred",
+                    ),
+                    IntentConstraint(
+                        type=ConstraintType.NO_DESTRUCTIVE_ACTIONS,
+                        params={},
+                        source="policy",
+                    ),
+                ],
+                ambiguities=["unspecified_treatment_of_external_attendees"],
+                intent_confidence=IntentConfidence.MEDIUM,
             )
 
         # Ticket Domain Pattern

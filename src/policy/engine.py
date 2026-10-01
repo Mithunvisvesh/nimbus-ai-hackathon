@@ -67,6 +67,13 @@ class PolicyEngine:
 
         # 3. Consequential / External Actions
         for act in plan.actions:
+            # Check for escalated tickets
+            if act.before_state.get("is_escalated") or "escalation" in act.before_state.get("tags", []):
+                return PolicyEvaluationResult(
+                    outcome=PolicyOutcome.CONFIRM,
+                    reason=f"Ticket '{act.resource_id}' is an active escalation. Explicit confirmation required before modification.",
+                )
+
             # Check for external attendees
             attendees = act.before_state.get("attendees", [])
             has_external = any(att.get("is_external", False) for att in attendees)
