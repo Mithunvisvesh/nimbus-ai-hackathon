@@ -98,6 +98,26 @@ class CareMCPServer:
                 simulate_failure=simulate_failure,
                 _authorization_token=self._authorization_token,
             )
+        elif operation == "calendar.create_event":
+            return self.calendar_store.create_event(
+                event_id=parameters["event_id"],
+                title=parameters["title"],
+                start_time=parameters["start_time"],
+                end_time=parameters["end_time"],
+                attendees=parameters.get("attendees"),
+                plan_id=plan_id,
+                action_hash=action_hash,
+                simulate_failure=simulate_failure,
+                _authorization_token=self._authorization_token,
+            )
+        elif operation == "calendar.delete_event":
+            return self.calendar_store.delete_event(
+                event_id=parameters["event_id"],
+                plan_id=plan_id,
+                action_hash=action_hash,
+                simulate_failure=simulate_failure,
+                _authorization_token=self._authorization_token,
+            )
         elif operation == "tickets.update_status":
             new_status = parameters.get("new_status") or parameters.get("status") or "closed"
             return self.tickets_store.update_status(
@@ -114,6 +134,40 @@ class CareMCPServer:
             return self.tickets_store.reopen_ticket(
                 ticket_id=parameters["ticket_id"],
                 reason=parameters.get("reason"),
+                plan_id=plan_id,
+                action_hash=action_hash,
+                simulate_failure=simulate_failure,
+                _authorization_token=self._authorization_token,
+            )
+        elif operation == "tickets.create_ticket":
+            return self.tickets_store.create_ticket(
+                ticket_id=parameters["ticket_id"],
+                title=parameters["title"],
+                priority=parameters.get("priority", "medium"),
+                assigned_to=parameters.get("assigned_to", "user_mithun"),
+                tags=parameters.get("tags"),
+                is_escalated=parameters.get("is_escalated", False),
+                status=parameters.get("status", "open"),
+                plan_id=plan_id,
+                action_hash=action_hash,
+                simulate_failure=simulate_failure,
+                _authorization_token=self._authorization_token,
+            )
+        elif operation == "tickets.delete_ticket":
+            return self.tickets_store.delete_ticket(
+                ticket_id=parameters["ticket_id"],
+                plan_id=plan_id,
+                action_hash=action_hash,
+                simulate_failure=simulate_failure,
+                _authorization_token=self._authorization_token,
+            )
+        elif operation == "tickets.update_ticket":
+            return self.tickets_store.update_ticket(
+                ticket_id=parameters["ticket_id"],
+                priority=parameters.get("priority"),
+                assigned_to=parameters.get("assigned_to"),
+                tags=parameters.get("tags"),
+                title=parameters.get("title"),
                 plan_id=plan_id,
                 action_hash=action_hash,
                 simulate_failure=simulate_failure,

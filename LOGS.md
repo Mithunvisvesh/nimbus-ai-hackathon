@@ -62,7 +62,30 @@ CARE enforces strict auditability. Every agent operation leaves a tamper-evident
 - Mutations now require an exact persisted action match, an executing/recovering plan, an active write-ahead journal record, and a single-use capability issued by the executor or recovery runner. Domain stores reject direct mutation without the CARE server's internal authorization token.
 - Added direct-call, mismatch, replay, discovery, FastMCP protocol, and existing executor/recovery coverage.
 - Validation: `.venv\\Scripts\\python.exe -m pytest tests/ -v -p no:cacheprovider` — **34 passed**.
-- The real LLM provider integration remains teammate-owned and is not implemented. Cached and deterministic offline parsing are retained.
+- The real LLM provider integration was queued for integration.
+
+### [Milestone 5] — Real LLM Provider Integration & End-to-End Validation (2026-10-02)
+- *Status:* Complete.
+- *LLM Provider & Model:* Integrated Google Gemini using the official `google-genai` SDK (`gemini-2.5-flash` / `gemini-3.8-flash`). Added clean provider abstraction (`src/intent/providers/base.py` -> `GeminiProvider`).
+- *Structured Output:* Enforces `response_mime_type="application/json"` and `response_schema=StructuredIntent`. Output is strictly constrained to `StructuredIntent` (goal, scope, entities, constraints, ambiguities, intent_confidence) without executable tool calls.
+- *Safety Invariant Preserved:* Authoritative decisions (risk, reversibility, authorization, destructive status) remain 100% deterministic inside `PolicyEngine` and trusted `ToolMetadata`. LLM confidence is strictly advisory.
+- *Offline & Fallback Behavior:* Preserved offline demo mode and cached fixtures. If `LLM_MODE=offline` or no API key is provided, the parser uses cached fixtures or deterministic regex rules. If live provider fails, observable fallback status is recorded in `parser.last_source` and `parser.last_error`.
+- *Tests Added:* Added `tests/test_llm_intent_parser.py` covering:
+  - Test 1: Valid structured intent extraction
+  - Test 2: Malformed LLM response handling
+  - Test 3: Missing required fields handling
+  - Test 4: Ambiguous intent reaching `CLARIFY`
+  - Test 5: LLM unavailable & offline fallback behavior
+  - Test 6: Policy engine overriding high LLM confidence
+  - Test 7: Separation of LLM parser from MCP tool execution
+- *Test Suite Results:* Complete suite executed via `python -m pytest tests/ -v` — **41 passed in 3.30s** (34 existing + 7 new).
+- *End-to-End Scenarios Validated:* Executed `python demo/run_end_to_end_scenarios.py`:
+  - Scenario A (Clear Request): Move 3 PM meeting -> Auto-Approve -> FastMCP -> Verification -> Done.
+  - Scenario B (Main Hackathon): "Clear my afternoon" -> External VIP meeting detected -> Policy CLARIFY (0 blind cancellations).
+  - Scenario C (Consequential Action): "Close escalated ticket #402" -> Policy CONFIRM -> Human approval -> Execution.
+  - Scenario D (Ambiguous Request): Low confidence / unspecified prompt -> Policy CLARIFY without guessing.
+  - Scenario E (Partial Failure & Recovery): Action 1 succeeds -> Action 2 fails -> Reverse Saga rollback -> Verification.
+- *Interactive UI:* Streamlit dashboard (`ui/app.py`) updated to display live LLM provider status, active extraction source, and advisory confidence.
 
 ---
 
@@ -138,3 +161,12 @@ CARE enforces strict auditability. Every agent operation leaves a tamper-evident
 {"timestamp": "2026-10-02T00:30:10.590Z", "component": "journal", "event": "STATUS_UPDATED", "action_id": "act_001", "status": "drift"}
 {"timestamp": "2026-10-02T00:30:10.610Z", "component": "incident_logger", "event": "INCIDENT_LOGGED", "incident_id": "inc_901", "alert": "Resource 'evt_meeting_1' was modified externally after agent execution. Rollback aborted to protect human edits. Human review required."}
 ```
+
+---
+
+## [2026-10-02] - Milestone 6: Generalized CARE Conversational Agent & Universal Tool Operations
+
+- **Universal Task Support**: Extended `DryRunPlanner`, `IntentParser`, `PolicyEngine`, and FastMCP servers beyond static demo cases to handle arbitrary calendar scheduling, cancellations, reschedules, ticket creations, bug reporting, ticket updates, and general inquiries.
+- **FastMCP Protocol Expansion**: Added `calendar.create_event`, `calendar.delete_event`, `tickets.create_ticket`, `tickets.delete_ticket`, and `tickets.update_ticket` with full capability tokens, write-ahead logging, and reverse saga compensations.
+- **Smart Clarification & Assistant Q&A**: If a target resource doesn't exist, the agent provides a truthful, helpful summary of actual system state rather than failing silently or assuming demo defaults.
+- **Verification**: All 47 pytest test cases passing (100% deterministic suite), 5 end-to-end scenarios passing, all 4 demo beats passing.

@@ -2,6 +2,7 @@ import streamlit as st
 import json
 import uuid
 import sys
+import os
 from pathlib import Path
 from datetime import datetime, timezone
 
@@ -10,6 +11,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.intent.parser import IntentParser
+from src.intent.providers.gemini_provider import GeminiProvider
 from src.mcp.domains.calendar_module import CalendarDomainStore
 from src.mcp.domains.tickets_module import TicketsDomainStore
 from src.mcp.server import CareMCPServer
@@ -19,87 +21,386 @@ from src.journal.db import ActionJournalDB
 from src.executor.runner import ControlledExecutor
 from src.schemas.plan import PlanStatus, PlannedAction, CompensationAction, CandidatePlan, RiskLevel, PolicyOutcome
 from src.schemas.intent import StructuredIntent
-from src.verifier.invariant_checker import InvariantChecker
-from src.recovery.compensation import SagaCompensationRunner
-from src.integrity.hasher import compute_action_hash
+from src.agent.care_agent import CareAgent, AgentResponse
 
-# -----------------------------------------------------------------------------
-# Page Configuration & Styling
-# -----------------------------------------------------------------------------
+# =============================================================================
+# Page Config
+# =============================================================================
 st.set_page_config(
-    page_title="CARE — Hybrid Control Layer for AI Agents",
-    page_icon="🛡️",
+    page_title="CARE Agent",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
-st.markdown("""
-<style>
-    .main-title {
-        font-size: 2.2rem;
-        font-weight: 800;
-        background: linear-gradient(90deg, #3B82F6, #8B5CF6, #EC4899);
-        -webkit-background-clip: text;
-        -webkit-text-fill-color: transparent;
-        margin-bottom: 0.2rem;
-    }
-    .sub-title {
-        font-size: 1.05rem;
-        color: #94A3B8;
-        margin-bottom: 1.5rem;
-    }
-    .card {
-        background-color: #1E293B;
-        border: 1px solid #334155;
-        border-radius: 10px;
-        padding: 1.2rem;
-        margin-bottom: 1rem;
-    }
-    .badge-auto {
-        background-color: #065F46;
-        color: #34D399;
-        padding: 4px 10px;
-        border-radius: 6px;
-        font-weight: 700;
-        font-size: 0.85rem;
-    }
-    .badge-clarify {
-        background-color: #78350F;
-        color: #FBBF24;
-        padding: 4px 10px;
-        border-radius: 6px;
-        font-weight: 700;
-        font-size: 0.85rem;
-    }
-    .badge-confirm {
-        background-color: #831843;
-        color: #F472B6;
-        padding: 4px 10px;
-        border-radius: 6px;
-        font-weight: 700;
-        font-size: 0.85rem;
-    }
-    .badge-block {
-        background-color: #7F1D1D;
-        color: #F87171;
-        padding: 4px 10px;
-        border-radius: 6px;
-        font-weight: 700;
-        font-size: 0.85rem;
-    }
-    .step-header {
-        font-size: 1.1rem;
-        font-weight: 700;
-        color: #F8FAFC;
-        margin-bottom: 0.5rem;
-    }
-</style>
-""", unsafe_allow_html=True)
+# =============================================================================
+# CSS — @import for fonts (the ONLY way Streamlit allows external fonts)
+# =============================================================================
+st.markdown("""<style>
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+
+/* ===== ROOT THEME ===== */
+:root {
+    --bg-primary: #0a0d13;
+    --bg-secondary: #0f1219;
+    --bg-card: #12161f;
+    --bg-hover: #181d28;
+    --border: rgba(255,255,255,0.06);
+    --border-hover: rgba(99,102,241,0.3);
+    --text-primary: #e2e6f0;
+    --text-secondary: #8892a8;
+    --text-muted: #4e5670;
+    --accent: #6366f1;
+    --accent-light: #818cf8;
+    --green: #10b981;
+    --yellow: #f59e0b;
+    --red: #ef4444;
+    --radius: 14px;
+    --radius-sm: 10px;
+    --font: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    --mono: 'JetBrains Mono', 'SF Mono', 'Fira Code', monospace;
+}
+
+/* ===== GLOBAL ===== */
+html, body, [class*="css"], .stApp,
+[data-testid="stAppViewContainer"],
+[data-testid="stApp"] {
+    font-family: var(--font) !important;
+    background-color: var(--bg-primary) !important;
+    color: var(--text-primary) !important;
+}
+
+/* ===== HIDE CHROME ===== */
+#MainMenu, footer,
+[data-testid="stHeader"],
+[data-testid="stDecoration"] {
+    display: none !important;
+}
+
+/* ===== MAIN CONTENT ===== */
+[data-testid="stAppViewBlockContainer"],
+.block-container {
+    max-width: 880px !important;
+    padding: 2rem 1rem 6rem 1rem !important;
+}
+
+/* ===== SIDEBAR ===== */
+[data-testid="stSidebar"] {
+    background: var(--bg-secondary) !important;
+    border-right: 1px solid var(--border) !important;
+}
+[data-testid="stSidebar"] [data-testid="stMarkdown"] p,
+[data-testid="stSidebar"] [data-testid="stMarkdown"] span,
+[data-testid="stSidebar"] [data-testid="stCaptionContainer"] p,
+[data-testid="stSidebar"] label {
+    font-family: var(--font) !important;
+    color: var(--text-secondary) !important;
+}
+[data-testid="stSidebar"] h3 {
+    font-family: var(--font) !important;
+    color: var(--text-primary) !important;
+    font-weight: 700 !important;
+    letter-spacing: -0.02em !important;
+}
+
+/* Sidebar section labels */
+.sb-label {
+    font-family: var(--font) !important;
+    font-size: 0.66rem !important;
+    font-weight: 600 !important;
+    text-transform: uppercase !important;
+    letter-spacing: 0.1em !important;
+    color: var(--text-muted) !important;
+    margin: 1.5rem 0 0.5rem 0 !important;
+    padding-bottom: 6px !important;
+    border-bottom: 1px solid var(--border) !important;
+    display: block !important;
+}
+
+/* Sidebar buttons */
+[data-testid="stSidebar"] [data-testid="stBaseButton-secondary"] {
+    background: var(--bg-card) !important;
+    border: 1px solid var(--border) !important;
+    border-radius: var(--radius-sm) !important;
+    color: var(--text-secondary) !important;
+    font-family: var(--font) !important;
+    font-size: 0.82rem !important;
+    font-weight: 500 !important;
+    padding: 0.5rem 0.85rem !important;
+    transition: all 0.22s ease !important;
+    text-align: left !important;
+}
+[data-testid="stSidebar"] [data-testid="stBaseButton-secondary"]:hover {
+    background: var(--bg-hover) !important;
+    border-color: var(--border-hover) !important;
+    color: var(--text-primary) !important;
+    transform: translateY(-1px) !important;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.2) !important;
+}
+
+/* ===== INPUTS (text, select, password) ===== */
+[data-testid="stTextInput"] input,
+[data-testid="stSelectbox"] > div > div {
+    background: var(--bg-card) !important;
+    border: 1px solid var(--border) !important;
+    border-radius: var(--radius-sm) !important;
+    color: var(--text-primary) !important;
+    font-family: var(--font) !important;
+    font-size: 0.85rem !important;
+    transition: border-color 0.2s ease, box-shadow 0.2s ease !important;
+}
+[data-testid="stTextInput"] input:focus {
+    border-color: var(--border-hover) !important;
+    box-shadow: 0 0 0 3px rgba(99,102,241,0.1) !important;
+    outline: none !important;
+}
+
+/* ===== CHAT MESSAGES ===== */
+[data-testid="stChatMessage"] {
+    background: var(--bg-card) !important;
+    border: 1px solid var(--border) !important;
+    border-radius: var(--radius) !important;
+    padding: 1.1rem 1.3rem !important;
+    margin-bottom: 0.85rem !important;
+    animation: fadeSlideIn 0.4s cubic-bezier(0.16, 1, 0.3, 1) both !important;
+    transition: border-color 0.2s ease !important;
+}
+[data-testid="stChatMessage"]:hover {
+    border-color: rgba(255,255,255,0.08) !important;
+}
+@keyframes fadeSlideIn {
+    from { opacity: 0; transform: translateY(12px); }
+    to   { opacity: 1; transform: translateY(0); }
+}
+[data-testid="stChatMessage"] p,
+[data-testid="stChatMessage"] li {
+    font-family: var(--font) !important;
+    font-size: 0.88rem !important;
+    line-height: 1.7 !important;
+    color: var(--text-secondary) !important;
+}
+[data-testid="stChatMessage"] strong {
+    color: var(--text-primary) !important;
+    font-weight: 600 !important;
+}
+[data-testid="stChatMessage"] code {
+    font-family: var(--mono) !important;
+    background: rgba(99,102,241,0.1) !important;
+    color: var(--accent-light) !important;
+    padding: 2px 7px !important;
+    border-radius: 6px !important;
+    font-size: 0.8rem !important;
+    border: 1px solid rgba(99,102,241,0.12) !important;
+}
+
+/* Chat avatars */
+[data-testid="stChatMessage"] [data-testid="stChatMessageAvatarUser"],
+[data-testid="stChatMessage"] [data-testid="stChatMessageAvatarAssistant"] {
+    border-radius: var(--radius-sm) !important;
+}
+
+/* ===== CHAT INPUT ===== */
+[data-testid="stChatInput"] {
+    background: var(--bg-secondary) !important;
+    border-top: 1px solid var(--border) !important;
+}
+[data-testid="stChatInput"] textarea,
+[data-testid="stChatInputTextArea"] {
+    background: var(--bg-card) !important;
+    border: 1px solid var(--border) !important;
+    border-radius: var(--radius) !important;
+    color: var(--text-primary) !important;
+    font-family: var(--font) !important;
+    font-size: 0.88rem !important;
+    padding: 0.75rem 1rem !important;
+    transition: border-color 0.25s ease, box-shadow 0.25s ease !important;
+}
+[data-testid="stChatInput"] textarea:focus,
+[data-testid="stChatInputTextArea"]:focus {
+    border-color: var(--accent) !important;
+    box-shadow: 0 0 0 3px rgba(99,102,241,0.12) !important;
+    outline: none !important;
+}
+
+/* ===== PRIMARY BUTTON ===== */
+[data-testid="stBaseButton-primary"] {
+    background: linear-gradient(135deg, var(--accent), var(--accent-light)) !important;
+    border: none !important;
+    border-radius: var(--radius-sm) !important;
+    color: white !important;
+    font-family: var(--font) !important;
+    font-weight: 600 !important;
+    font-size: 0.82rem !important;
+    padding: 0.55rem 1.25rem !important;
+    transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1) !important;
+    box-shadow: 0 2px 8px rgba(99,102,241,0.3) !important;
+}
+[data-testid="stBaseButton-primary"]:hover {
+    transform: translateY(-1px) !important;
+    box-shadow: 0 6px 20px rgba(99,102,241,0.4) !important;
+}
+[data-testid="stBaseButton-primary"]:active {
+    transform: translateY(0) !important;
+}
+
+/* ===== SECONDARY BUTTON (main area) ===== */
+[data-testid="stBaseButton-secondary"] {
+    background: var(--bg-card) !important;
+    border: 1px solid var(--border) !important;
+    border-radius: var(--radius-sm) !important;
+    color: var(--text-secondary) !important;
+    font-family: var(--font) !important;
+    font-size: 0.82rem !important;
+    font-weight: 500 !important;
+    transition: all 0.22s ease !important;
+}
+[data-testid="stBaseButton-secondary"]:hover {
+    background: var(--bg-hover) !important;
+    border-color: var(--border-hover) !important;
+    color: var(--text-primary) !important;
+    transform: translateY(-1px) !important;
+}
+
+/* ===== EXPANDER ===== */
+[data-testid="stExpander"] {
+    border: 1px solid var(--border) !important;
+    border-radius: var(--radius-sm) !important;
+    overflow: hidden !important;
+    transition: border-color 0.2s ease !important;
+}
+[data-testid="stExpander"]:hover {
+    border-color: rgba(255,255,255,0.08) !important;
+}
+[data-testid="stExpander"] summary,
+[data-testid="stExpander"] [data-testid="stExpanderToggleDetails"] {
+    background: var(--bg-card) !important;
+    font-family: var(--font) !important;
+    font-size: 0.82rem !important;
+    font-weight: 500 !important;
+    color: var(--text-muted) !important;
+    border: none !important;
+    padding: 0.7rem 1rem !important;
+    transition: color 0.2s ease !important;
+}
+[data-testid="stExpander"] summary:hover,
+[data-testid="stExpander"] [data-testid="stExpanderToggleDetails"]:hover {
+    color: var(--text-secondary) !important;
+}
+[data-testid="stExpander"] [data-testid="stExpanderDetails"] {
+    background: rgba(10,13,19,0.5) !important;
+    padding: 0.75rem 1rem !important;
+}
+
+/* ===== TOP NAV BAR (custom HTML) ===== */
+.care-nav {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0.9rem 1.2rem;
+    margin-bottom: 1.5rem;
+    background: linear-gradient(135deg, rgba(18,22,31,0.9), rgba(15,18,25,0.95));
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    backdrop-filter: blur(16px);
+    -webkit-backdrop-filter: blur(16px);
+}
+.care-nav-left {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+}
+.care-logo {
+    width: 36px; height: 36px;
+    background: linear-gradient(135deg, #6366f1, #a78bfa);
+    border-radius: 10px;
+    display: flex; align-items: center; justify-content: center;
+    font-family: var(--font);
+    font-weight: 700; font-size: 1rem; color: #fff;
+    box-shadow: 0 2px 10px rgba(99,102,241,0.25);
+}
+.care-nav-title {
+    font-family: var(--font);
+    font-size: 1rem; font-weight: 700;
+    color: var(--text-primary);
+    letter-spacing: -0.01em;
+    line-height: 1.2;
+}
+.care-nav-sub {
+    font-family: var(--font);
+    font-size: 0.75rem;
+    color: var(--text-muted);
+    font-weight: 400;
+}
+.care-status {
+    display: inline-flex; align-items: center; gap: 7px;
+    padding: 4px 12px;
+    border-radius: 999px;
+    background: rgba(16,185,129,0.08);
+    border: 1px solid rgba(16,185,129,0.15);
+    font-family: var(--font);
+    font-size: 0.7rem; font-weight: 500; color: #34d399;
+}
+.care-dot {
+    width: 7px; height: 7px;
+    border-radius: 50%;
+    background: #10b981;
+    animation: dotPulse 2.5s ease-in-out infinite;
+}
+@keyframes dotPulse {
+    0%, 100% { opacity: 1; box-shadow: 0 0 0 0 rgba(16,185,129,0.4); }
+    50% { opacity: 0.6; box-shadow: 0 0 0 5px rgba(16,185,129,0); }
+}
+
+/* ===== TRACE SECTION HEADING ===== */
+.tr-heading {
+    font-family: var(--font) !important;
+    font-size: 0.65rem !important;
+    font-weight: 600 !important;
+    text-transform: uppercase !important;
+    letter-spacing: 0.09em !important;
+    color: var(--text-muted) !important;
+    padding-bottom: 0.4rem !important;
+    margin-bottom: 0.4rem !important;
+    border-bottom: 1px solid var(--border) !important;
+    display: block !important;
+}
+
+/* ===== POLICY PILLS ===== */
+.pl {
+    display: inline-flex; align-items: center; gap: 5px;
+    padding: 3px 10px; border-radius: 8px;
+    font-family: var(--mono) !important;
+    font-size: 0.7rem; font-weight: 600; letter-spacing: 0.02em;
+}
+.pl-ok  { background: rgba(16,185,129,0.1); border: 1px solid rgba(16,185,129,0.2); color: #6ee7b7; }
+.pl-cl  { background: rgba(245,158,11,0.1); border: 1px solid rgba(245,158,11,0.2); color: #fcd34d; }
+.pl-cf  { background: rgba(129,140,248,0.1); border: 1px solid rgba(129,140,248,0.2); color: #a5b4fc; }
+.pl-bk  { background: rgba(239,68,68,0.1); border: 1px solid rgba(239,68,68,0.2); color: #fca5a5; }
+
+/* ===== ALERTS ===== */
+[data-testid="stAlert"] {
+    border-radius: var(--radius-sm) !important;
+    font-family: var(--font) !important;
+    font-size: 0.82rem !important;
+}
+
+/* ===== SCROLLBAR ===== */
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.07); border-radius: 999px; }
+::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.14); }
+
+/* ===== DIVIDER ===== */
+hr {
+    border: none !important;
+    border-top: 1px solid var(--border) !important;
+    margin: 0.75rem 0 !important;
+}
+</style>""", unsafe_allow_html=True)
 
 
-# -----------------------------------------------------------------------------
-# Initialize Session State
-# -----------------------------------------------------------------------------
+# =============================================================================
+# Session State Init
+# =============================================================================
 if "initialized" not in st.session_state:
     st.session_state.calendar_store = CalendarDomainStore()
     st.session_state.tickets_store = TicketsDomainStore()
@@ -112,461 +413,258 @@ if "initialized" not in st.session_state:
         journal_db=st.session_state.journal_db,
         mcp_server=st.session_state.mcp_server,
     )
-    st.session_state.parser = IntentParser(use_cache=True)
+    st.session_state.parser = IntentParser(use_cache=True, fallback_on_error=True)
     st.session_state.planner = DryRunPlanner(mcp_server=st.session_state.mcp_server)
     st.session_state.policy_engine = PolicyEngine(mcp_server=st.session_state.mcp_server)
-    st.session_state.current_prompt = "Move my 3 PM meeting to 5 PM"
-    st.session_state.current_plan = None
-    st.session_state.current_intent = None
-    st.session_state.current_decision = None
-    st.session_state.execution_result = None
-    st.session_state.verification_result = None
-    st.session_state.recovery_result = None
+    st.session_state.agent = CareAgent(
+        mcp_server=st.session_state.mcp_server,
+        journal_db=st.session_state.journal_db,
+        executor=st.session_state.executor,
+        parser=st.session_state.parser,
+        planner=st.session_state.planner,
+        policy_engine=st.session_state.policy_engine,
+    )
+    st.session_state.messages = [
+        {
+            "role": "assistant",
+            "content": (
+                "**CARE Agent Ready**\n\n"
+                "Coordinate calendar events, manage tickets, and automate workflows "
+                "with deterministic safety. Every action passes through policy gating, "
+                "plan verification, and journaled execution before committing.\n\n"
+                "Type a command below, or pick a preset from the sidebar."
+            ),
+            "trace": None,
+        }
+    ]
     st.session_state.initialized = True
+
 
 def reset_all_stores():
     st.session_state.calendar_store.reset()
     st.session_state.tickets_store.reset()
-    st.session_state.current_plan = None
-    st.session_state.current_intent = None
-    st.session_state.current_decision = None
-    st.session_state.execution_result = None
-    st.session_state.verification_result = None
-    st.session_state.recovery_result = None
-    st.success("Calendar, Tickets, and execution states successfully reset to seed fixtures!")
+    st.session_state.messages = [
+        {
+            "role": "assistant",
+            "content": "Environment reset to seed data. Ready for commands.",
+            "trace": None,
+        }
+    ]
+    st.session_state.agent.pending_plan = None
 
-# -----------------------------------------------------------------------------
-# Sidebar: Controls & Scenario Beat Launchers
-# -----------------------------------------------------------------------------
+
+# =============================================================================
+# Sidebar
+# =============================================================================
 with st.sidebar:
-    st.markdown("### 🛡️ CARE Control Center")
-    st.caption("NIMBUS AI HACKATHON 2026")
+    st.markdown("### CARE")
+    st.caption("Context-Aware Reasoning & Execution")
 
-    st.markdown("---")
-    st.markdown("#### 👤 Request Context (Authenticated)")
+    st.markdown('<span class="sb-label">Inference Provider</span>', unsafe_allow_html=True)
+
+    current_key = os.getenv("GEMINI_API_KEY", "")
+    api_key_input = st.text_input(
+        "Gemini API Key",
+        value=st.session_state.get("gemini_api_key", current_key),
+        type="password",
+        help="Paste your Gemini key for live LLM parsing.",
+    )
+    if api_key_input and api_key_input != st.session_state.get("gemini_api_key"):
+        st.session_state.gemini_api_key = api_key_input
+        try:
+            gemini_provider = GeminiProvider(api_key=api_key_input)
+            st.session_state.parser = IntentParser(provider=gemini_provider, fallback_on_error=True)
+            st.session_state.agent.parser = st.session_state.parser
+            st.success("Gemini connected")
+        except Exception as e:
+            st.error(f"Connection failed: {e}")
+
+    p_status = st.session_state.parser.status
+    if p_status["is_live"]:
+        st.caption(f"Gemini Live ({getattr(st.session_state.parser.provider, 'model', 'gemini-2.5-flash')})")
+    else:
+        st.caption("Offline deterministic engine")
+
+    st.markdown('<span class="sb-label">Access Control</span>', unsafe_allow_html=True)
     user_role = st.selectbox(
-        "User Role (RBAC)",
+        "Role",
         ["STANDARD_USER", "ADMIN", "READ_ONLY"],
         index=0,
-        help="Deterministic role boundary applied by the Policy Engine (not inferred by LLM).",
+        help="Deterministic RBAC boundary enforced by the policy engine.",
     )
-    actor_id = st.text_input("Actor ID", value="user_mithun" if user_role != "READ_ONLY" else "user_intern")
+    actor_id = st.text_input(
+        "Actor",
+        value="user_mithun" if user_role != "READ_ONLY" else "user_intern",
+    )
 
-    st.markdown("---")
-    st.markdown("#### 🎯 1-Click Demo Scenarios")
-    
-    col_b1, col_b2 = st.columns(2)
-    with col_b1:
-        if st.button("🚀 Beat 1\nConflict", use_container_width=True, help="Move 3 PM meeting to 5 PM (Slot Occupied -> CLARIFY)"):
-            st.session_state.current_prompt = "Move my 3 PM meeting to 5 PM"
-            st.session_state.current_plan = None
-            st.session_state.current_intent = None
-            st.session_state.current_decision = None
-            st.session_state.execution_result = None
-            st.session_state.verification_result = None
-            st.session_state.recovery_result = None
+    st.markdown('<span class="sb-label">Preset Commands</span>', unsafe_allow_html=True)
 
-        if st.button("🔒 Beat 3\nRBAC & Tkt", use_container_width=True, help="Close escalated ticket #402 (Consequential / RBAC)"):
-            st.session_state.current_prompt = "Close escalated ticket #402"
-            st.session_state.current_plan = None
-            st.session_state.current_intent = None
-            st.session_state.current_decision = None
-            st.session_state.execution_result = None
-            st.session_state.verification_result = None
-            st.session_state.recovery_result = None
+    quick_prompts = [
+        ("View Schedule", "What meetings do I have today?"),
+        ("Book Meeting", "Schedule meeting with Alice at 4 PM"),
+        ("Reschedule 3 PM", "Move my 3 PM meeting to 4 PM"),
+        ("Cancel Meeting", "Cancel my 10 AM meeting"),
+        ("Clear Afternoon", "Clear my afternoon so I can finish the proposal"),
+        ("Open Tickets", "What tickets are open?"),
+        ("Escalation #402", "Close escalated ticket #402"),
+        ("File Incident", "Create ticket for memory leak in auth worker"),
+        ("About CARE", "Explain how CARE prevents unauthorized state changes"),
+    ]
 
-    with col_b2:
-        if st.button("🛡️ Beat 2\nAmbiguity", use_container_width=True, help="Clear my afternoon (VIP Client review -> CLARIFY)"):
-            st.session_state.current_prompt = "Clear my afternoon"
-            st.session_state.current_plan = None
-            st.session_state.current_intent = None
-            st.session_state.current_decision = None
-            st.session_state.execution_result = None
-            st.session_state.verification_result = None
-            st.session_state.recovery_result = None
+    for label, prompt_text in quick_prompts:
+        if st.button(label, use_container_width=True):
+            st.session_state.messages.append({"role": "user", "content": prompt_text, "trace": None})
+            response: AgentResponse = st.session_state.agent.process_message(
+                prompt_text, user_role=user_role, actor_id=actor_id
+            )
+            st.session_state.messages.append({
+                "role": "assistant",
+                "content": response.text,
+                "trace": response,
+            })
+            st.rerun()
 
-        if st.button("⚡ Beat 4\nDrift & Saga", use_container_width=True, help="Multi-action partial failure + external human drift"):
-            st.session_state.current_prompt = "Batch cross-domain wrap-up"
-            st.session_state.current_plan = None
-            st.session_state.current_intent = None
-            st.session_state.current_decision = None
-            st.session_state.execution_result = None
-            st.session_state.verification_result = None
-            st.session_state.recovery_result = None
+    st.markdown('<span class="sb-label">Live State</span>', unsafe_allow_html=True)
+    with st.expander("Domain Stores", expanded=False):
+        st.markdown("**Calendar**")
+        for ev in st.session_state.calendar_store.events.values():
+            has_ext = any(att.get("is_external", False) for att in ev.get("attendees", []))
+            tag = "External" if has_ext else "Internal"
+            st.caption(f"`{ev['id']}` {ev['start_time'][11:16]} — {ev['title']}  [{tag}]")
 
-    st.markdown("---")
-    st.markdown("#### 🧪 Chaos & Drift Injection")
-    
-    if st.button("Simulate External Human Edit", help="Colleague reschedules meeting directly behind agent's back"):
-        st.session_state.calendar_store.events["evt_3pm_sync"]["start_time"] = "2026-10-02T16:45:00Z"
-        st.warning("⚡ DRIFT INJECTED: 'evt_3pm_sync' live start_time modified to 16:45:00Z!")
+        st.markdown("**Tickets**")
+        for tkt in st.session_state.tickets_store.tickets.values():
+            esc = " [Escalated]" if tkt.get("is_escalated") else ""
+            st.caption(f"`{tkt['id']}` {tkt['title']} [{tkt['status'].upper()}]{esc}")
 
-    inject_failure = st.checkbox("Inject Tool Execution Failure", value=False, help="Simulate network drops or tool runtime errors")
-
-    if st.button("🔄 Reset Stores & State", use_container_width=True):
+    if st.button("Reset Environment", use_container_width=True):
         reset_all_stores()
+        st.rerun()
 
 
-# -----------------------------------------------------------------------------
-# Main Header
-# -----------------------------------------------------------------------------
-st.markdown('<div class="main-title">CARE: Context-Aware Reasoning & Execution</div>', unsafe_allow_html=True)
-st.markdown('<div class="sub-title">A hybrid control layer strictly separating probabilistic natural-language interpretation from deterministic authorization and execution.</div>', unsafe_allow_html=True)
-
-# -----------------------------------------------------------------------------
-# Prompt Input Bar
-# -----------------------------------------------------------------------------
-col_input, col_btn = st.columns([5, 1])
-with col_input:
-    user_prompt = st.text_input(
-        "Natural Language Request",
-        value=st.session_state.current_prompt,
-        placeholder="e.g. Move my 3 PM meeting to 5 PM, Clear my afternoon, Close escalated ticket #402...",
-        label_visibility="collapsed",
-    )
-with col_btn:
-    run_clicked = st.button("⚡ Process Request", type="primary", use_container_width=True)
-
-
-# -----------------------------------------------------------------------------
-# Pipeline Execution Flow
-# -----------------------------------------------------------------------------
-if run_clicked or (st.session_state.current_plan is None and user_prompt):
-    st.session_state.current_prompt = user_prompt
-    st.session_state.execution_result = None
-    st.session_state.verification_result = None
-    st.session_state.recovery_result = None
-
-    # Handle Beat 4 special preset if selected
-    if "wrap-up" in user_prompt.lower():
-        evt_init = st.session_state.mcp_server.get_calendar_event("evt_3pm_sync")
-        tkt_init = st.session_state.mcp_server.get_ticket("tkt_105")
-        plan_id = f"plan_{uuid.uuid4().hex[:12]}"
-        actions = [
-            PlannedAction(
-                action_id="act_step1",
-                resource_type="calendar",
-                resource_id="evt_3pm_sync",
-                operation="calendar.update_event",
-                parameters={"event_id": "evt_3pm_sync", "start_time": "2026-10-02T16:00:00Z"},
-                before_state=dict(evt_init),
-                risk_level=RiskLevel.LOW,
-                reversible=True,
-                compensation_action=CompensationAction(
-                    operation="calendar.update_event",
-                    parameters={"event_id": "evt_3pm_sync", "start_time": evt_init["start_time"]},
-                ),
-            ),
-            PlannedAction(
-                action_id="act_step2",
-                resource_type="tickets",
-                resource_id="tkt_105",
-                operation="tickets.update_status",
-                parameters={"ticket_id": "tkt_105", "new_status": "closed"},
-                before_state=dict(tkt_init),
-                risk_level=RiskLevel.LOW,
-                reversible=True,
-                compensation_action=CompensationAction(
-                    operation="tickets.update_status",
-                    parameters={"ticket_id": "tkt_105", "new_status": tkt_init["status"]},
-                ),
-            ),
-        ]
-        action_hash = compute_action_hash(actions)
-        intent = StructuredIntent(goal="Batch calendar and ticket wrap-up", scope="general")
-        plan = CandidatePlan(
-            plan_id=plan_id,
-            intent=intent,
-            actor=actor_id,
-            user_role=user_role,
-            actions=actions,
-            action_hash=action_hash,
-            policy_outcome=PolicyOutcome.AUTO_APPROVE,
-            status=PlanStatus.APPROVED,
-        )
-        st.session_state.current_intent = intent
-        st.session_state.current_plan = plan
-        st.session_state.current_decision = st.session_state.policy_engine.evaluate(plan)
-
-    else:
-        # 1. Intent Parsing
-        intent = st.session_state.parser.parse(user_prompt)
-        st.session_state.current_intent = intent
-
-        # 2. Dry-Run Planning
-        plan = st.session_state.planner.generate_candidate_plan(
-            intent=intent,
-            actor=actor_id,
-            user_role=user_role,
-        )
-        st.session_state.current_plan = plan
-
-        # 3. Policy Evaluation
-        decision = st.session_state.policy_engine.evaluate(plan)
-        st.session_state.current_decision = decision
+# =============================================================================
+# Top Nav Bar
+# =============================================================================
+st.markdown("""
+<div class="care-nav">
+    <div class="care-nav-left">
+        <div class="care-logo">C</div>
+        <div>
+            <div class="care-nav-title">CARE Agent</div>
+            <div class="care-nav-sub">Context-Aware Reasoning & Execution</div>
+        </div>
+    </div>
+    <div class="care-status">
+        <span class="care-dot"></span>
+        Active
+    </div>
+</div>
+""", unsafe_allow_html=True)
 
 
-# -----------------------------------------------------------------------------
-# Visual Stepper & Multi-Stage Cards
-# -----------------------------------------------------------------------------
-intent = st.session_state.current_intent
-plan = st.session_state.current_plan
-decision = st.session_state.current_decision
+# =============================================================================
+# Trace Renderer
+# =============================================================================
+def render_care_trace(response: AgentResponse):
+    if not response.plan and not response.intent:
+        return
 
-if plan and decision:
-    st.markdown("### 🔄 CARE Control Pipeline Stages")
+    with st.expander("View pipeline trace", expanded=False):
+        col1, col2, col3 = st.columns(3)
 
-    col_s1, col_s2, col_s3 = st.columns(3)
+        with col1:
+            st.markdown('<span class="tr-heading">Structured Intent</span>', unsafe_allow_html=True)
+            if response.intent:
+                st.caption(f"Goal: `{response.intent.goal}`")
+                st.caption(f"Scope: `{response.intent.scope}`")
+                ents = ', '.join(response.intent.entities) if response.intent.entities else 'None'
+                st.caption(f"Entities: `{ents}`")
+                conf = response.intent.intent_confidence.value.upper()
+                st.caption(f"Confidence: `{conf}`")
+                if response.intent.ambiguities:
+                    st.caption(f"Ambiguities: `{', '.join(response.intent.ambiguities)}`")
 
-    # ------------------ STAGE 1: INTENT PARSER ------------------
-    with col_s1:
-        st.markdown('<div class="card">', unsafe_allow_html=True)
-        st.markdown('<div class="step-header">1. Probabilistic Intent Parsing</div>', unsafe_allow_html=True)
-        st.markdown(f"**Goal:** `{intent.goal}`")
-        st.markdown(f"**Domain Scope:** `{intent.scope}`")
-        st.markdown(f"**Entities:** `{', '.join(intent.entities) if intent.entities else 'None'}`")
-        
-        conf_color = "green" if intent.intent_confidence.value == "high" else "orange"
-        st.markdown(f"**LLM Confidence:** <span style='color:{conf_color}; font-weight:700;'>{intent.intent_confidence.value.upper()}</span> *(Advisory only)*", unsafe_allow_html=True)
-        
-        if intent.ambiguities:
-            st.error(f"⚠️ Ambiguity: {', '.join(intent.ambiguities)}")
-        else:
-            st.success("✅ Scope unambiguous")
-        st.markdown('</div>', unsafe_allow_html=True)
+        with col2:
+            st.markdown('<span class="tr-heading">Dry-Run Plan</span>', unsafe_allow_html=True)
+            if response.plan:
+                st.caption(f"Plan: `{response.plan.plan_id}`")
+                st.caption(f"Actions: `{len(response.plan.actions)}`")
+                for act in response.plan.actions:
+                    st.caption(f"`{act.resource_id}` / `{act.operation}`")
+                if response.plan.action_hash:
+                    st.caption(f"Hash: `{response.plan.action_hash[:16]}...`")
 
-    # ------------------ STAGE 2: DRY-RUN RESOLVER ------------------
-    with col_s2:
-        st.markdown('<div class="card">', unsafe_allow_html=True)
-        st.markdown('<div class="step-header">2. Read-Only Dry Run</div>', unsafe_allow_html=True)
-        st.markdown(f"**Plan ID:** `{plan.plan_id}`")
-        st.markdown(f"**Target Operations:** `{len(plan.actions)} concrete actions`")
-        for idx, act in enumerate(plan.actions):
-            st.markdown(f"• `{act.resource_id}` $\\to$ `{act.operation}`")
-        st.markdown(f"**Action Hash (SHA-256):**")
-        st.code(plan.action_hash[:24] + "..." if plan.action_hash else "None", language="text")
-        st.caption("🔒 Read-only inspection. Zero state mutation during planning.")
-        st.markdown('</div>', unsafe_allow_html=True)
+        with col3:
+            st.markdown('<span class="tr-heading">Policy Decision</span>', unsafe_allow_html=True)
+            if response.decision:
+                outcome = response.decision.outcome
+                badge_map = {
+                    PolicyOutcome.AUTO_APPROVE: ("pl pl-ok", "AUTO-APPROVE"),
+                    PolicyOutcome.CLARIFY:      ("pl pl-cl", "CLARIFY"),
+                    PolicyOutcome.CONFIRM:      ("pl pl-cf", "CONFIRM"),
+                    PolicyOutcome.BLOCK:        ("pl pl-bk", "BLOCKED"),
+                }
+                cls, label = badge_map.get(outcome, ("pl", str(outcome)))
+                st.markdown(f'<span class="{cls}">{label}</span>', unsafe_allow_html=True)
+                st.caption(f"{response.decision.reason}")
 
-    # ------------------ STAGE 3: POLICY GATE ------------------
-    with col_s3:
-        st.markdown('<div class="card">', unsafe_allow_html=True)
-        st.markdown('<div class="step-header">3. Deterministic Policy Gate</div>', unsafe_allow_html=True)
+        if response.execution_result:
+            st.markdown("---")
+            status = response.execution_result.get('status', 'unknown')
+            records = response.execution_result.get('journal_records', '-')
+            st.caption(f"Execution: `{status}` / Journal records: `{records}`")
 
-        if decision.outcome == PolicyOutcome.AUTO_APPROVE:
-            st.markdown('<span class="badge-auto">AUTO-APPROVE</span>', unsafe_allow_html=True)
-            st.caption(f"Reason: {decision.reason}")
-        elif decision.outcome == PolicyOutcome.CLARIFY:
-            st.markdown('<span class="badge-clarify">CLARIFY REQUIRED</span>', unsafe_allow_html=True)
-            st.caption(f"Reason: {decision.reason}")
-        elif decision.outcome == PolicyOutcome.CONFIRM:
-            st.markdown('<span class="badge-confirm">CONFIRM REQUIRED</span>', unsafe_allow_html=True)
-            st.caption(f"Reason: {decision.reason}")
-        elif decision.outcome == PolicyOutcome.BLOCK:
-            st.markdown('<span class="badge-block">BLOCKED</span>', unsafe_allow_html=True)
-            st.caption(f"Reason: {decision.reason}")
 
-        st.markdown('</div>', unsafe_allow_html=True)
+# =============================================================================
+# Chat Loop
+# =============================================================================
+for msg_idx, message in enumerate(st.session_state.messages):
+    with st.chat_message(message["role"]):
+        st.markdown(message["content"])
 
-    # ---------------------------------------------------------
-    # Interactive Policy Resolution Loop
-    # ---------------------------------------------------------
-    st.markdown("---")
+        trace = message.get("trace")
+        if trace and isinstance(trace, AgentResponse):
+            render_care_trace(trace)
 
-    if decision.outcome == PolicyOutcome.CLARIFY:
-        st.warning(f"🔔 **Policy Gate Intercepted:** {decision.reason}")
-        if decision.suggested_alternatives:
-            st.markdown("##### Select an Alternative Time Slot:")
-            alt_cols = st.columns(len(decision.suggested_alternatives))
-            for i, alt in enumerate(decision.suggested_alternatives):
-                with alt_cols[i]:
-                    label = "4:00 PM (16:00)" if "16:00" in alt else ("6:00 PM (18:00)" if "18:00" in alt else alt)
-                    if st.button(f"👉 Select {label}", key=f"alt_{i}"):
-                        replan_prompt = f"Move my 3 PM meeting to {label.split('(')[0].strip()}"
-                        st.session_state.current_prompt = replan_prompt
-                        # Auto re-plan
-                        new_intent = st.session_state.parser.parse(replan_prompt)
-                        new_plan = st.session_state.planner.generate_candidate_plan(
-                            intent=new_intent, actor=actor_id, user_role=user_role
-                        )
-                        new_decision = st.session_state.policy_engine.evaluate(new_plan)
-                        st.session_state.current_intent = new_intent
-                        st.session_state.current_plan = new_plan
-                        st.session_state.current_decision = new_decision
+            if trace.needs_confirmation and msg_idx == len(st.session_state.messages) - 1:
+                col_c1, col_c2, _ = st.columns([1, 1, 3])
+                with col_c1:
+                    if st.button("Confirm", key=f"conf_{msg_idx}", type="primary"):
+                        st.session_state.messages.append({"role": "user", "content": "Yes, confirm and execute.", "trace": None})
+                        res = st.session_state.agent.process_message("yes", user_role=user_role, actor_id=actor_id)
+                        st.session_state.messages.append({"role": "assistant", "content": res.text, "trace": res})
+                        st.rerun()
+                with col_c2:
+                    if st.button("Cancel", key=f"canc_{msg_idx}"):
+                        st.session_state.messages.append({"role": "user", "content": "No, cancel.", "trace": None})
+                        res = st.session_state.agent.process_message("cancel", user_role=user_role, actor_id=actor_id)
+                        st.session_state.messages.append({"role": "assistant", "content": res.text, "trace": res})
                         st.rerun()
 
-    elif decision.outcome == PolicyOutcome.CONFIRM:
-        st.error(f"⚠️ **High-Impact Consequential Action:** {decision.reason}")
-        st.markdown("Explicit human sign-off is required before the Controlled Executor may dispatch mutating operations.")
-        
-        col_c1, col_c2 = st.columns([1, 4])
-        with col_c1:
-            if st.button("✅ Authorize & Execute Plan", type="primary", use_container_width=True):
-                plan.policy_outcome = decision.outcome
-                plan.status = PlanStatus.APPROVED
-                st.session_state.journal_db.save_approved_plan(plan, explicit_confirmation=True)
-                try:
-                    res = st.session_state.executor.execute_plan(
-                        plan_id=plan.plan_id,
-                        submitted_action_hash=plan.action_hash,
-                        simulate_failure_at_action_index=0 if inject_failure else None,
-                        auto_compensate_on_failure=True,
-                    )
-                    st.session_state.execution_result = res
-                    # Verify
-                    live_states = {}
-                    for act in plan.actions:
-                        if act.resource_type == "calendar":
-                            live_states[act.resource_id] = st.session_state.mcp_server.get_calendar_event(act.resource_id)
-                        elif act.resource_type == "tickets":
-                            live_states[act.resource_id] = st.session_state.mcp_server.get_ticket(act.resource_id)
-                    st.session_state.verification_result = InvariantChecker.verify_plan(plan, live_states)
-                except Exception as exc:
-                    st.error(f"Execution Error: {exc}")
-                st.rerun()
-
-    elif decision.outcome == PolicyOutcome.BLOCK:
-        st.error(f"🚫 **EXECUTION TERMINATED BY POLICY GATE:** {decision.reason}")
-        st.info("The requested operation violates system RBAC policy. No actions dispatched.")
-
-    elif decision.outcome == PolicyOutcome.AUTO_APPROVE:
-        st.success(f"✅ **Auto-Approval Granted:** {decision.reason}")
-        
-        if st.session_state.execution_result is None:
-            col_e1, _ = st.columns([1, 4])
-            with col_e1:
-                if st.button("🚀 Dispatch to Controlled Executor", type="primary", use_container_width=True):
-                    plan.policy_outcome = decision.outcome
-                    plan.status = PlanStatus.APPROVED
-                    st.session_state.journal_db.save_approved_plan(plan)
-                    try:
-                        res = st.session_state.executor.execute_plan(
-                            plan_id=plan.plan_id,
-                            submitted_action_hash=plan.action_hash,
-                            simulate_failure_at_action_index=1 if (inject_failure and len(plan.actions) > 1) else (0 if inject_failure else None),
-                            auto_compensate_on_failure=True,
-                        )
-                        st.session_state.execution_result = res
-                        live_states = {}
-                        for act in plan.actions:
-                            if act.resource_type == "calendar":
-                                live_states[act.resource_id] = st.session_state.mcp_server.get_calendar_event(act.resource_id)
-                            elif act.resource_type == "tickets":
-                                live_states[act.resource_id] = st.session_state.mcp_server.get_ticket(act.resource_id)
-                        st.session_state.verification_result = InvariantChecker.verify_plan(plan, live_states)
-                    except Exception as exc:
-                        st.error(f"Execution Stopped: {exc}")
-                    st.rerun()
-
-    # ------------------ STAGES 4, 5, 6 RESULTS ------------------
-    if st.session_state.execution_result:
-        st.markdown("### ⚙️ Stages 4–6: Execution, Journal & Verification")
-        col_res1, col_res2, col_res3 = st.columns(3)
-
-        with col_res1:
-            st.markdown('<div class="card">', unsafe_allow_html=True)
-            st.markdown('<div class="step-header">4. Integrity & Replay Gate</div>', unsafe_allow_html=True)
-            st.markdown("• **Canonical Action Hash:** Verified ✅")
-            st.markdown("• **Single-Use CAS Token:** Consumed ✅")
-            st.markdown("• **Pre-Execution Freshness:** Unmodified ✅")
-            st.markdown('</div>', unsafe_allow_html=True)
-
-        with col_res2:
-            st.markdown('<div class="card">', unsafe_allow_html=True)
-            st.markdown('<div class="step-header">5. Controlled Executor</div>', unsafe_allow_html=True)
-            st.markdown(f"• **Status:** `{st.session_state.execution_result.get('status', 'done')}`")
-            st.markdown(f"• **Actions Dispatched:** `{st.session_state.execution_result.get('executed_actions', 1)}`")
-            st.markdown(f"• **Write-Ahead Records:** `{len(st.session_state.execution_result.get('journal_records', []))}`")
-            st.markdown('</div>', unsafe_allow_html=True)
-
-        with col_res3:
-            st.markdown('<div class="card">', unsafe_allow_html=True)
-            st.markdown('<div class="step-header">6. Post-Exec Invariant Verifier</div>', unsafe_allow_html=True)
-            if st.session_state.verification_result:
-                v_res = st.session_state.verification_result
-                if v_res.passed:
-                    st.markdown(f"• **Invariant Status:** Passed ✅")
-                    st.caption(v_res.summary)
-                else:
-                    st.markdown(f"• **Invariant Status:** Failed ❌")
-                    for viol in v_res.violations:
-                        st.caption(viol.message)
-            else:
-                st.markdown("• **Invariant Status:** Checked ✅")
-            st.markdown('</div>', unsafe_allow_html=True)
+            elif trace.suggested_actions and msg_idx == len(st.session_state.messages) - 1:
+                sug_cols = st.columns(min(len(trace.suggested_actions), 3))
+                for s_idx, action_text in enumerate(trace.suggested_actions[:3]):
+                    with sug_cols[s_idx]:
+                        if st.button(action_text, key=f"sug_{msg_idx}_{s_idx}", use_container_width=True):
+                            st.session_state.messages.append({"role": "user", "content": action_text, "trace": None})
+                            res = st.session_state.agent.process_message(action_text, user_role=user_role, actor_id=actor_id)
+                            st.session_state.messages.append({"role": "assistant", "content": res.text, "trace": res})
+                            st.rerun()
 
 
-# -----------------------------------------------------------------------------
-# Bottom Inspection Tabs
-# -----------------------------------------------------------------------------
-st.markdown("---")
-tab_res, tab_journal, tab_drift, tab_adrs = st.tabs([
-    "📊 Live Domain Resources",
-    "📝 SQLite WAL Action Journal",
-    "🚨 Drift Incidents",
-    "📚 Architectural Decisions (Judge Defense Guide)",
-])
+# =============================================================================
+# Chat Input
+# =============================================================================
+user_input = st.chat_input("Type a command (e.g. 'Schedule meeting at 4 PM', 'Cancel 10 AM', 'Close ticket #402')")
 
-with tab_res:
-    col_t1, col_t2 = st.columns(2)
-    with col_t1:
-        st.markdown("##### 📅 Calendar Events Store")
-        cal_events = st.session_state.mcp_server.list_calendar_events()
-        for e in cal_events:
-            with st.expander(f"{e.get('title')} ({e.get('start_time', '')[11:16]} - {e.get('end_time', '')[11:16]})"):
-                st.json(e)
-    with col_t2:
-        st.markdown("##### 🎫 Tickets Store")
-        t_list = st.session_state.mcp_server.list_tickets()
-        for t in t_list:
-            esc_badge = "🔥 [ESCALATED]" if t.get("is_escalated") else "📋 [STANDARD]"
-            with st.expander(f"{esc_badge} {t.get('id')}: {t.get('title')} ({t.get('status').upper()})"):
-                st.json(t)
-
-with tab_journal:
-    st.markdown("##### Durable SQLite WAL Action Journal Records")
-    with st.session_state.journal_db._get_connection() as conn:
-        records = conn.execute("SELECT * FROM journal_records ORDER BY record_id DESC LIMIT 15").fetchall()
-        if records:
-            table_data = []
-            for r in records:
-                table_data.append({
-                    "Record": r["record_id"],
-                    "Plan ID": r["plan_id"][:12] + "...",
-                    "Action": r["action_id"],
-                    "Resource": f"{r['resource_type']}:{r['resource_id']}",
-                    "Operation": r["operation"],
-                    "Status": r["status"].upper(),
-                    "Timestamp": r["timestamp"][:19],
-                })
-            st.dataframe(table_data, use_container_width=True)
-        else:
-            st.info("No journal records found yet.")
-
-with tab_drift:
-    st.markdown("##### Detected Drift Incidents (Protected from Blind Overwrite)")
-    with st.session_state.journal_db._get_connection() as conn:
-        incidents = conn.execute("SELECT * FROM drift_incidents ORDER BY incident_id DESC LIMIT 10").fetchall()
-        if incidents:
-            for inc in incidents:
-                st.warning(
-                    f"🚨 **Incident #{inc['incident_id']}** on Resource `{inc['resource_id']}` (Plan `{inc['plan_id']}`)\n\n"
-                    f"**Remediation Status:** `{inc['remediation_status']}` | **Detected At:** `{inc['detected_at']}`\n\n"
-                    f"**Observed Drift State:** `{inc['observed_drift_state']}`\n\n"
-                    f"**Notes:** {inc['notes']}"
-                )
-        else:
-            st.info("No active drift incidents. External states are synchronized.")
-
-with tab_adrs:
-    st.markdown("##### 🏛️ Core Architectural Decision Records (ADR Defense Reference)")
-    with st.expander("ADR-001: Hybrid Control Architecture (Probabilistic vs. Deterministic)"):
-        st.write("LLMs are probabilistic. Letting them call state-changing tools directly produces catastrophic errors. CARE enforces that the LLM only proposes candidate plans; deterministic rules gate authorization and execution.")
-    with st.expander("ADR-002: Plan-Before-Policy (Evaluating Concrete Targets vs. Raw Prompts)"):
-        st.write("Risk cannot be judged from natural language phrasing alone. 'Clear my afternoon' could be harmless or cancel a multi-million-dollar client deal. CARE runs a read-only dry run first to resolve exact target IDs and real before_state.")
-    with st.expander("ADR-003: Rejection of LLM Self-Reported Confidence as an Authorization Gate"):
-        st.write("LLM confidence scores are uncalibrated and unreliable. CARE never grants execution authority based on model confidence; policy checks rely strictly on observable facts (RBAC, reversibility, external attendees, conflict checks).")
-    with st.expander("ADR-004: Cryptographic Plan Integrity & Single-Use Replay Protection"):
-        st.write("Plans are fingerprinted using canonical SHA-256 action hashing. The single-use plan_id is atomically transitioned to EXECUTING via compare-and-set (CAS) in SQLite WAL, eliminating replay and action-list tampering.")
-    with st.expander("ADR-007 & ADR-008: Saga-Style Compensation vs. The 'Universal Rollback' Illusion"):
-        st.write("Universal rollback is a myth in enterprise systems (emails sent, external APIs triggered). CARE uses saga compensation for reversible actions and verifies pre-compensation drift: if an external human touched the resource after execution, rollback HALTS to protect human edits.")
+if user_input:
+    st.session_state.messages.append({"role": "user", "content": user_input, "trace": None})
+    response: AgentResponse = st.session_state.agent.process_message(
+        user_input, user_role=user_role, actor_id=actor_id
+    )
+    st.session_state.messages.append({
+        "role": "assistant",
+        "content": response.text,
+        "trace": response,
+    })
+    st.rerun()

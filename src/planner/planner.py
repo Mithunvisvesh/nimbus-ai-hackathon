@@ -31,9 +31,9 @@ class DryRunPlanner:
         actions: List[PlannedAction] = []
 
         if intent.scope == "calendar":
-            actions = self._resolve_calendar_actions(intent)
+            actions = self._resolve_calendar_actions(intent, actor=actor)
         elif intent.scope == "tickets":
-            actions = self._resolve_tickets_actions(intent)
+            actions = self._resolve_tickets_actions(intent, actor=actor)
 
         # Compute canonical action hash
         action_hash = compute_action_hash(actions) if actions else ""
@@ -48,13 +48,13 @@ class DryRunPlanner:
             status=PlanStatus.PLANNED,
         )
 
-    def _resolve_calendar_actions(self, intent: StructuredIntent) -> List[PlannedAction]:
+    def _resolve_calendar_actions(self, intent: StructuredIntent, actor: str = "user_mithun") -> List[PlannedAction]:
         events = self.mcp.list_calendar_events()
-        if not events:
-            return []
 
         # Case 1: Multi-event "Clear afternoon calendar" (Beat 2)
         if "afternoon" in intent.entities or "clear" in intent.goal.lower():
+            if not events:
+                return []
             afternoon_events = [
                 e for e in events
                 if any(t in e.get("start_time", "") for t in ["12:", "13:", "14:", "15:", "16:", "17:"])
@@ -95,7 +95,156 @@ class DryRunPlanner:
                 )
             return actions
 
-        # Case 2: Target event reschedule (e.g. 3 PM sync)
+        # Case 2: Calendar Create Event (e.g. "Schedule meeting with Alice at 4 PM")
+        if "create" in intent.entities or any(w in intent.goal.lower() for w in ["schedule", "book", "add meeting", "create meeting"]):
+            event_id = f"evt_{uuid.uuid4().hex[:8]}"
+            title = "New Meeting"
+            clock_tuple = (14, 0)
+
+            # Extract title and clock from entities
+            for ent in intent.entities:
+                if ent == "create":
+                    continue
+                parsed_c = self._parse_clock(ent)
+                if parsed_c:
+                    clock_tuple = parsed_c
+                elif len(ent) > 2 and title == "New Meeting":
+                    title = ent
+
+            if title == "New Meeting" and "meeting" in intent.goal.lower():
+                title = intent.goal
+
+            # Generate target ISO timestamps
+            from datetime import timedelta
+            base_date = datetime.now().date()
+            if events:
+                try:
+                    first_ev_start = events[0].get("start_time", "")
+                    if len(first_ev_start) >= 10:
+                        base_date = datetime.strptime(first_ev_start[:10], "%Y-%m-%d").date()
+                except Exception:
+                    pass
+
+            is_tomorrow = "tomorrow" in intent.entities or "tomorrow" in intent.goal.lower()
+            target_date = (base_date + timedelta(days=1)) if is_tomorrow else base_date
+            target_start_dt = datetime.combine(target_date, datetime.min.time()).replace(
+                hour=clock_tuple[0], minute=clock_tuple[1], second=0, microsecond=0
+            )
+            target_end_dt = target_start_dt + timedelta(minutes=30)
+            target_start = target_start_dt.isoformat() + "Z"
+            target_end = target_end_dt.isoformat() + "Z"
+
+            action = PlannedAction(
+                action_id=f"act_{uuid.uuid4().hex[:6]}",
+                resource_type="calendar",
+                resource_id=event_id,
+                operation="calendar.create_event",
+                parameters={
+                    "event_id": event_id,
+                    "title": title,
+                    "start_time": target_start,
+                    "end_time": target_end,
+                    "attendees": [{"name": actor, "is_external": False}],
+                },
+                before_state={},
+                risk_level=RiskLevel.LOW,
+                reversible=True,
+                compensation_action=CompensationAction(
+                    operation="calendar.delete_event",
+                    parameters={"event_id": event_id},
+                ),
+                constraints=intent.constraints,
+            )
+            return [action]
+
+        # Case 3: Cancel / Delete Single Event (e.g. "Cancel my 10 AM meeting", "Delete evt_001")
+        if "cancel" in intent.entities or any(w in intent.goal.lower() for w in ["cancel", "delete", "remove", "drop"]):
+            if not events:
+                return []
+            target_event = None
+
+            # Try matching by ID, clock, title, or attendee
+            for ent in intent.entities:
+                if ent == "cancel":
+                    continue
+                # By ID
+                for ev in events:
+                    if ev["id"].lower() == ent.lower() or ent.lower() in ev["id"].lower():
+                        target_event = ev
+                        break
+                if target_event:
+                    break
+
+                # By clock
+                c = self._parse_clock(ent)
+                if not c:
+                    clk_m = re.search(r"\b(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\b", ent.lower())
+                    if clk_m:
+                        c = self._parse_clock(clk_m.group(0))
+                if c:
+                    for ev in events:
+                        if self._event_clock(ev) == c:
+                            target_event = ev
+                            break
+                if target_event:
+                    break
+
+                # By title or attendee substring
+                for ev in events:
+                    if ent.lower() in ev.get("title", "").lower() or any(
+                        ent.lower() in att.get("name", "").lower() for att in ev.get("attendees", [])
+                    ):
+                        target_event = ev
+                        break
+                if target_event:
+                    break
+
+            if not target_event:
+                # Check goal string for clock or words
+                for ev in events:
+                    ev_c = self._event_clock(ev)
+                    if ev_c and f"{ev_c[0]}" in intent.goal:
+                        target_event = ev
+                        break
+                    if any(w in ev.get("title", "").lower() for w in intent.goal.lower().split() if len(w) >= 4):
+                        target_event = ev
+                        break
+
+            if not target_event:
+                return []
+
+            before_state = dict(target_event)
+            has_external = any(att.get("is_external", False) for att in target_event.get("attendees", []))
+            risk_level = RiskLevel.HIGH if has_external else RiskLevel.LOW
+
+            action = PlannedAction(
+                action_id=f"act_{uuid.uuid4().hex[:6]}",
+                resource_type="calendar",
+                resource_id=target_event["id"],
+                operation="calendar.update_event",
+                parameters={
+                    "event_id": target_event["id"],
+                    "title": f"[CANCELLED] {target_event.get('title', '')}",
+                },
+                before_state=before_state,
+                risk_level=risk_level,
+                reversible=True,
+                compensation_action=CompensationAction(
+                    operation="calendar.update_event",
+                    parameters={
+                        "event_id": target_event["id"],
+                        "title": before_state.get("title", ""),
+                        "start_time": before_state.get("start_time"),
+                        "end_time": before_state.get("end_time"),
+                    },
+                ),
+                constraints=intent.constraints,
+            )
+            return [action]
+
+        # Case 4: Target event reschedule (e.g. 3 PM sync to 4 PM)
+        if not events:
+            return []
         source_time = self._parse_clock(intent.entities[0]) if len(intent.entities) >= 2 else None
         candidates = [ev for ev in events if source_time and self._event_clock(ev) == source_time]
         if not candidates:
@@ -115,6 +264,12 @@ class DryRunPlanner:
 
         # Determine target times
         target_clock = self._parse_clock(intent.entities[1]) if len(intent.entities) >= 2 else None
+        if target_clock is None:
+            for ent in intent.entities:
+                c = self._parse_clock(ent)
+                if c is not None and c != source_time:
+                    target_clock = c
+                    break
         if target_clock is None:
             return []
         start = datetime.fromisoformat(target_event["start_time"].replace("Z", "+00:00"))
@@ -161,8 +316,50 @@ class DryRunPlanner:
         )
         return [action]
 
-    def _resolve_tickets_actions(self, intent: StructuredIntent) -> List[PlannedAction]:
+    def _resolve_tickets_actions(self, intent: StructuredIntent, actor: str = "user_mithun") -> List[PlannedAction]:
         tickets = self.mcp.list_tickets() if hasattr(self.mcp, "list_tickets") else []
+
+        # Case 1: Ticket Creation (e.g. "Create ticket for payment error", "File bug login failure")
+        if "create" in intent.entities or any(w in intent.goal.lower() for w in ["create ticket", "file ticket", "file bug", "open ticket", "report bug"]):
+            ticket_id = f"tkt_{uuid.uuid4().hex[:4]}"
+            title = "New Bug Ticket"
+            priority = "medium"
+
+            for ent in intent.entities:
+                if ent == "create":
+                    continue
+                if ent in ["high", "medium", "low", "critical"]:
+                    priority = ent
+                elif len(ent) > 3 and title == "New Bug Ticket":
+                    title = ent
+
+            if title == "New Bug Ticket" and "ticket" in intent.goal.lower():
+                title = intent.goal
+
+            action = PlannedAction(
+                action_id=f"act_{uuid.uuid4().hex[:6]}",
+                resource_type="tickets",
+                resource_id=ticket_id,
+                operation="tickets.create_ticket",
+                parameters={
+                    "ticket_id": ticket_id,
+                    "title": title,
+                    "priority": priority,
+                    "assigned_to": actor,
+                    "status": "open",
+                },
+                before_state={},
+                risk_level=RiskLevel.HIGH if priority in ["high", "critical"] else RiskLevel.LOW,
+                reversible=True,
+                compensation_action=CompensationAction(
+                    operation="tickets.delete_ticket",
+                    parameters={"ticket_id": ticket_id},
+                ),
+                constraints=intent.constraints,
+            )
+            return [action]
+
+        # Case 2: Ticket Status Mutation (close, reopen, in_progress)
         if not tickets:
             return []
 
@@ -192,9 +389,9 @@ class DryRunPlanner:
         risk_level = RiskLevel.HIGH if is_escalated else RiskLevel.LOW
 
         new_status = "closed"
-        if "reopen" in intent.goal.lower():
+        if "reopen" in intent.goal.lower() or "reopen" in intent.entities:
             new_status = "open"
-        elif "in_progress" in intent.goal.lower():
+        elif "in_progress" in intent.goal.lower() or "in_progress" in intent.entities:
             new_status = "in_progress"
 
         action = PlannedAction(

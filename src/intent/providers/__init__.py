@@ -1,4 +1,3 @@
-from src.intent.parser import IntentParser
 from src.intent.providers.base import (
     LLMProvider,
     LLMProviderError,
@@ -8,10 +7,9 @@ from src.intent.providers.base import (
 from src.intent.providers.gemini_provider import GeminiProvider
 
 __all__ = [
-    "IntentParser",
     "LLMProvider",
-    "GeminiProvider",
     "LLMProviderError",
     "LLMResponseValidationError",
     "LLMProviderUnavailableError",
+    "GeminiProvider",
 ]

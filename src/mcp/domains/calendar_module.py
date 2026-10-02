@@ -43,6 +43,24 @@ CALENDAR_TOOL_METADATA: Dict[str, ToolMetadata] = {
         affects_external_party=False,
         compensation_supported=True,
     ),
+    "calendar.create_event": ToolMetadata(
+        operation="calendar.create_event",
+        read_only=False,
+        destructive=False,
+        reversible=True,
+        external_effect=False,
+        affects_external_party=False,
+        compensation_supported=True,
+    ),
+    "calendar.delete_event": ToolMetadata(
+        operation="calendar.delete_event",
+        read_only=False,
+        destructive=True,
+        reversible=True,
+        external_effect=False,
+        affects_external_party=False,
+        compensation_supported=True,
+    ),
 }
 
 class CalendarDomainStore:
@@ -135,3 +153,57 @@ class CalendarDomainStore:
             event["title"] = title
 
         return dict(event)
+
+    def create_event(
+        self,
+        event_id: str,
+        title: str,
+        start_time: str,
+        end_time: str,
+        attendees: Optional[List[Dict[str, Any]]] = None,
+        plan_id: Optional[str] = None,
+        action_hash: Optional[str] = None,
+        simulate_failure: bool = False,
+        _authorization_token: object | None = None,
+    ) -> Dict[str, Any]:
+        """Gated state-changing tool to create a calendar event."""
+        if simulate_failure:
+            raise RuntimeError(f"Simulated execution failure for tool calendar.create_event on {event_id}")
+
+        if _authorization_token is None or _authorization_token is not self._authorization_token:
+            raise PermissionError("Calendar mutation must be authorized by the CARE MCP server.")
+        if not plan_id or not action_hash:
+            raise PermissionError("Direct unauthorized mutation rejected: plan_id and action_hash required.")
+
+        new_event = {
+            "id": event_id,
+            "title": title,
+            "start_time": start_time,
+            "end_time": end_time,
+            "attendees": attendees or [{"name": "You", "is_external": False}],
+        }
+        self.events[event_id] = new_event
+        return dict(new_event)
+
+    def delete_event(
+        self,
+        event_id: str,
+        plan_id: Optional[str] = None,
+        action_hash: Optional[str] = None,
+        simulate_failure: bool = False,
+        _authorization_token: object | None = None,
+    ) -> Dict[str, Any]:
+        """Gated state-changing tool to delete a calendar event."""
+        if simulate_failure:
+            raise RuntimeError(f"Simulated execution failure for tool calendar.delete_event on {event_id}")
+
+        if _authorization_token is None or _authorization_token is not self._authorization_token:
+            raise PermissionError("Calendar mutation must be authorized by the CARE MCP server.")
+        if not plan_id or not action_hash:
+            raise PermissionError("Direct unauthorized mutation rejected: plan_id and action_hash required.")
+
+        if event_id not in self.events:
+            raise KeyError(f"Calendar event {event_id} not found.")
+
+        deleted = self.events.pop(event_id)
+        return dict(deleted)

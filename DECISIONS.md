@@ -18,6 +18,7 @@
 - [ADR-008: Pre-Compensation Drift Detection](#adr-008-pre-compensation-drift-detection)
 - [ADR-009: Single Namespaced MCP Server with Privileged Executor Separation](#adr-009-single-namespaced-mcp-server)
 - [ADR-010: Defensibility & Honesty Framework (Boundary Claims)](#adr-010-defensibility--honesty-framework)
+- [ADR-011: LLM Provider Abstraction & Boundary Isolation](#adr-011-llm-provider-abstraction--boundary-isolation)
 
 ---
 
@@ -103,3 +104,16 @@
   4. *Not claiming ticket closure is irreversible.*
   5. *Not claiming production-readiness.*
 - **Consequences:** Elevates credibility and aligns directly with enterprise engineering standards.
+
+---
+
+### ADR-011: LLM Provider Abstraction & Boundary Isolation
+- **Status:** Accepted
+- **Context:** The CARE pipeline requires a real LLM for natural-language intent extraction while maintaining offline demo resilience and strict architectural boundaries. The LLM must not be tightly coupled to the application core, must not bypass deterministic policy, and must never directly execute tool mutations.
+- **Decision:** Introduce a lightweight `LLMProvider` abstract interface in `src/intent/providers/base.py` and concrete `GeminiProvider` implementing Google's `google-genai` SDK with JSON schema enforcement (`response_schema=StructuredIntent`). The provider strictly maps `Natural Language -> StructuredIntent`. The `IntentParser` delegates to `LLMProvider` when configured, with an observable offline fallback to deterministic regex rules/fixtures when offline or when explicitly requested.
+- **Consequences:** 
+  1. The LLM has zero direct references or access to execution tools, FastMCP server, or write-ahead journal.
+  2. Safety decisions (risk, authorization, reversibility) remain 100% deterministic in `PolicyEngine`.
+  3. Tests remain completely deterministic using `MockLLMProvider` without live API keys or external network dependencies.
+  4. Both live LLM extraction and offline hackathon demonstration modes are preserved seamlessly.
+

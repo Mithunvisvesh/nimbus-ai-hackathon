@@ -48,19 +48,20 @@ class PolicyEngine:
         # Check calendar availability/conflict feasibility if MCP server is available
         if self.mcp:
             for act in plan.actions:
-                if act.operation == "calendar.update_event":
+                if act.operation in ("calendar.update_event", "calendar.create_event"):
                     target_start = act.parameters.get("start_time")
                     target_end = act.parameters.get("end_time")
                     if target_start and target_end:
+                        exclude_id = act.resource_id if act.operation == "calendar.update_event" else None
                         avail = self.mcp.check_calendar_availability(
-                            target_start, target_end, exclude_event_id=act.resource_id
+                            target_start, target_end, exclude_event_id=exclude_id
                         )
                         if not avail.get("available", True):
                             conflict = avail.get("conflicting_event", {})
                             return PolicyEvaluationResult(
                                 outcome=PolicyOutcome.CLARIFY,
                                 reason=f"Target slot is occupied by '{conflict.get('title', 'another event')}'.",
-                            suggested_alternatives=self._suggest_alternatives(target_start, target_end, act.resource_id),
+                                suggested_alternatives=self._suggest_alternatives(target_start, target_end, act.resource_id),
                             )
 
         # 3. Consequential / External Actions
@@ -73,7 +74,7 @@ class PolicyEngine:
                 )
 
             # Check for external attendees
-            attendees = act.before_state.get("attendees", [])
+            attendees = act.before_state.get("attendees", []) or act.parameters.get("attendees", [])
             has_external = any(att.get("is_external", False) for att in attendees)
             if has_external:
                 return PolicyEvaluationResult(

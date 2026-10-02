@@ -436,22 +436,96 @@ Judges evaluate both technical capability and architectural honesty. The CARE te
 
 ---
 
-## 12. Getting Started & Repository Structure
+## 12. Getting Started & Running CARE
+
+### 12.1 Configuration & LLM Setup
+
+CARE integrates **Google Gemini** as its real LLM provider via the official `google-genai` SDK using strict structured JSON schema enforcement (`response_schema=StructuredIntent`).
+
+Create a `.env` file in the project root (note: `.env` is already in `.gitignore`):
+
+```bash
+# Google Gemini API Key
+GEMINI_API_KEY=your_gemini_api_key_here
+
+# Optional: Model selection (defaults to gemini-2.5-flash)
+GEMINI_MODEL=gemini-2.5-flash
+
+# Optional: Execution mode (auto | live | offline)
+# - auto: Uses live Gemini if GEMINI_API_KEY is present; otherwise falls back offline.
+# - live: Enforces live Gemini extraction; errors if key is missing.
+# - offline: Runs 100% offline using deterministic rules and cached fixtures.
+LLM_MODE=auto
+```
+
+### 12.2 Running Tests
+
+The test suite runs 100% deterministically without requiring a live API key or external network access:
+
+```bash
+python -m pytest tests/ -v
+```
+*(41 passing tests covering regression, unit tests, and LLM boundary validation).*
+
+### 12.3 Running the End-to-End Scenarios
+
+Execute the automated end-to-end validator covering Scenarios A through E:
+
+```bash
+python demo/run_end_to_end_scenarios.py
+```
+
+### 12.4 Running the CLI Demo Beats
+
+Run all 4 milestone beats via CLI:
+
+```bash
+python demo/run_beat.py --all
+```
+
+Or individual beats:
+```bash
+python demo/run_beat.py --beat 1  # Conflict Check & Re-planning
+python demo/run_beat.py --beat 2  # Ambiguous Scope & VIP Protection
+python demo/run_beat.py --beat 3  # RBAC & Escalated Ticket Gating
+python demo/run_beat.py --beat 4  # Partial Failure & Pre-Compensation Drift
+```
+
+### 12.5 Running the Interactive Streamlit UI
+
+Launch the CARE visual control center dashboard:
+
+```bash
+streamlit run ui/app.py
+```
+
+---
+
+## 13. Repository Structure
 
 ```
 nimbus-ai-hackathon/
-├── README.md                               # Project entry point & documentation index
-├── NIMBUS_2026_CARE_Hybrid_Updated.docx    # Reference design specification
-├── src/                                    # Implementation source (under development)
-│   ├── orchestrator/                       # Intent parsing, planning, and policy gate
-│   ├── policy/                             # Deterministic rules & RBAC engine
-│   ├── executor/                           # Controlled executor, plan integrity, freshness
-│   ├── journal/                            # SQLite Write-Ahead Journal & drift checker
-│   ├── mcp/                                # MCP server and domain modules (calendar, tickets)
-│   └── verifier/                           # Post-execution invariant checks
-└── tests/                                  # Demo beat test suite & scenario runners
+├── README.md                               # Project entry point & architecture specification
+├── PRD.md                                  # Product requirements & acceptance criteria
+├── DATA.md                                 # Canonical schemas (StructuredIntent, Plan, Journal)
+├── API.md                                  # API contracts & FastMCP tool interface specification
+├── DECISIONS.md                            # Architecture Decision Records (ADR-001 to ADR-011)
+├── LOGS.md                                 # Milestone logs & execution audit history
+├── src/                                    # CARE framework implementation
+│   ├── intent/                             # Intent parser & LLM provider abstraction
+│   │   └── providers/                      # Base LLMProvider & GeminiProvider
+│   ├── planner/                            # Read-only dry run & candidate plan generator
+│   ├── policy/                             # Deterministic PolicyEngine & RBAC rules
+│   ├── integrity/                          # Canonical JSON SHA-256 action hashing
+│   ├── journal/                            # SQLite WAL write-ahead action journal
+│   ├── executor/                           # ControlledExecutor & pre-execution freshness
+│   ├── mcp/                                # FastMCP server & domain stores (calendar, tickets)
+│   ├── verifier/                           # Post-execution invariant checker
+│   └── recovery/                           # Saga compensation & pre-compensation drift detector
+├── demo/                                   # Demo scripts, seed fixtures, and rehearsal runner
+├── tests/                                  # Full test suite (41 passing tests)
+└── ui/                                     # Streamlit interactive control center dashboard
 ```
 
-Documentation authority is domain-specific: README is the project entry point; PRD defines requirements; DATA defines schemas/data contracts; API defines interfaces; DECISIONS records architectural decisions; PHASES defines the roadmap; LOGS records implementation history.
-
 *Built with precision for the Nimbus AI Hackathon 2026.*
+

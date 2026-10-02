@@ -11,6 +11,7 @@ Usage:
 import argparse
 import secrets
 import sys
+import uuid
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -163,7 +164,7 @@ def run_beat_4():
     evt_init = mcp.get_calendar_event("evt_3pm_sync")
     tkt_init = mcp.get_ticket("tkt_105")
 
-    plan_id = "plan_beat4_cli_demo"
+    plan_id = f"plan_beat4_{uuid.uuid4().hex[:8]}"
     actions = [
         PlannedAction(
             action_id="act_cal",

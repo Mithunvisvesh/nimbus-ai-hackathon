@@ -47,6 +47,28 @@ def create_fastmcp_server(
         params.update({k: v for k, v in {"start_time": start_time, "end_time": end_time, "title": title}.items() if v is not None})
         return care.dispatch_tool("calendar.update_event", params, plan_id, action_hash, simulate_failure=simulate_failure, action_id=action_id, dispatch_token=dispatch_token, dispatch_kind=dispatch_kind)
 
+    @protocol.tool(name="calendar.create_event", description="Create a planned calendar event. Requires exact active CARE plan/action binding.")
+    def calendar_create_event(
+        plan_id: str, action_hash: str, action_id: str, event_id: str,
+        title: str, start_time: str, end_time: str,
+        attendees: Optional[list[dict[str, Any]]] = None,
+        simulate_failure: bool = False, dispatch_kind: str = "execute",
+        dispatch_token: Optional[str] = None,
+    ) -> dict[str, Any]:
+        params = {"event_id": event_id, "title": title, "start_time": start_time, "end_time": end_time}
+        if attendees is not None:
+            params["attendees"] = attendees
+        return care.dispatch_tool("calendar.create_event", params, plan_id, action_hash, simulate_failure=simulate_failure, action_id=action_id, dispatch_token=dispatch_token, dispatch_kind=dispatch_kind)
+
+    @protocol.tool(name="calendar.delete_event", description="Delete a planned calendar event. Requires exact active CARE plan/action binding.")
+    def calendar_delete_event(
+        plan_id: str, action_hash: str, action_id: str, event_id: str,
+        simulate_failure: bool = False, dispatch_kind: str = "execute",
+        dispatch_token: Optional[str] = None,
+    ) -> dict[str, Any]:
+        params = {"event_id": event_id}
+        return care.dispatch_tool("calendar.delete_event", params, plan_id, action_hash, simulate_failure=simulate_failure, action_id=action_id, dispatch_token=dispatch_token, dispatch_kind=dispatch_kind)
+
     @protocol.tool(name="tickets.list_tickets", description="Read tickets, optionally filtered by status or escalation state.")
     def tickets_list_tickets(status: Optional[str] = None, is_escalated: Optional[bool] = None) -> list[dict[str, Any]]:
         return care.list_tickets(status, is_escalated)
@@ -80,6 +102,52 @@ def create_fastmcp_server(
         if reason is not None:
             params["reason"] = reason
         return care.dispatch_tool("tickets.reopen_ticket", params, plan_id, action_hash, simulate_failure=simulate_failure, action_id=action_id, dispatch_token=dispatch_token, dispatch_kind=dispatch_kind)
+
+    @protocol.tool(name="tickets.create_ticket", description="Create a planned ticket. Requires exact active CARE plan/action binding.")
+    def tickets_create_ticket(
+        plan_id: str, action_hash: str, action_id: str, ticket_id: str,
+        title: str, priority: str = "medium", assigned_to: str = "user_mithun",
+        tags: Optional[list[str]] = None, is_escalated: bool = False,
+        status: str = "open", simulate_failure: bool = False,
+        dispatch_kind: str = "execute", dispatch_token: Optional[str] = None,
+    ) -> dict[str, Any]:
+        params = {
+            "ticket_id": ticket_id, "title": title, "priority": priority,
+            "assigned_to": assigned_to, "status": status,
+        }
+        if tags is not None:
+            params["tags"] = tags
+        if is_escalated:
+            params["is_escalated"] = is_escalated
+        return care.dispatch_tool("tickets.create_ticket", params, plan_id, action_hash, simulate_failure=simulate_failure, action_id=action_id, dispatch_token=dispatch_token, dispatch_kind=dispatch_kind)
+
+    @protocol.tool(name="tickets.delete_ticket", description="Delete a planned ticket. Requires exact active CARE plan/action binding.")
+    def tickets_delete_ticket(
+        plan_id: str, action_hash: str, action_id: str, ticket_id: str,
+        simulate_failure: bool = False, dispatch_kind: str = "execute",
+        dispatch_token: Optional[str] = None,
+    ) -> dict[str, Any]:
+        params = {"ticket_id": ticket_id}
+        return care.dispatch_tool("tickets.delete_ticket", params, plan_id, action_hash, simulate_failure=simulate_failure, action_id=action_id, dispatch_token=dispatch_token, dispatch_kind=dispatch_kind)
+
+    @protocol.tool(name="tickets.update_ticket", description="Update planned ticket attributes. Requires exact active CARE plan/action binding.")
+    def tickets_update_ticket(
+        plan_id: str, action_hash: str, action_id: str, ticket_id: str,
+        priority: Optional[str] = None, assigned_to: Optional[str] = None,
+        tags: Optional[list[str]] = None, title: Optional[str] = None,
+        simulate_failure: bool = False, dispatch_kind: str = "execute",
+        dispatch_token: Optional[str] = None,
+    ) -> dict[str, Any]:
+        params = {"ticket_id": ticket_id}
+        if priority is not None:
+            params["priority"] = priority
+        if assigned_to is not None:
+            params["assigned_to"] = assigned_to
+        if tags is not None:
+            params["tags"] = tags
+        if title is not None:
+            params["title"] = title
+        return care.dispatch_tool("tickets.update_ticket", params, plan_id, action_hash, simulate_failure=simulate_failure, action_id=action_id, dispatch_token=dispatch_token, dispatch_kind=dispatch_kind)
 
     @protocol.tool(name="care.get_tool_metadata", description="Read trusted server-side policy metadata for a registered operation.")
     def care_get_tool_metadata(operation: str) -> Optional[dict[str, Any]]:

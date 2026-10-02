@@ -56,6 +56,23 @@ class FreshnessChecker:
         else:
             live_state = None
 
+        if not expected_before_state:
+            # Resource creation: fresh if resource does not yet exist in live store
+            if live_state is None:
+                return FreshnessResult(
+                    is_fresh=True,
+                    resource_id=resource_id,
+                    resource_type=resource_type,
+                    live_state=None,
+                )
+            return FreshnessResult(
+                is_fresh=False,
+                resource_id=resource_id,
+                resource_type=resource_type,
+                live_state=live_state,
+                error_message=f"Resource '{resource_id}' already exists in live store prior to creation.",
+            )
+
         if live_state is None:
             return FreshnessResult(
                 is_fresh=False,
